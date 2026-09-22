@@ -1247,7 +1247,7 @@ async function selfPing() {
       method: 'GET',
       headers: {
         'User-Agent': SELF_PING_USER_AGENT,
-        'Accept': 'text/html,application/json;q=0.9,*/*;q=0.8',
+        'Accept': 'text/html,application/json;q=0.9,**;q=0.8',
         'Cache-Control': 'no-cache',
       },
     });
