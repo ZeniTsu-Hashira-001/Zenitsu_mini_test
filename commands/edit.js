@@ -91,7 +91,7 @@ const EDIT_APIS = [
 module.exports = {
     name: 'edit',
     aliases: ['modify', 'imageedit', 'nanobanana'],
-    category: 'fun',
+    category: 'tools',
 
     async execute({ sock, msg, args, jid }) {
         const senderJid = msg.key.participant || msg.key.remoteJid;
