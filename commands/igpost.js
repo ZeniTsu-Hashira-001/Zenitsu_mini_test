@@ -102,7 +102,7 @@ async function getDisplayName(sock, jid) {
 
 module.exports = {
     name: 'igpost',
-    aliases: ['instapost', 'ig', 'fakepost'],
+    aliases: ['instapost', 'igp', 'fakeigpost'],
     category: 'fun',
     description: 'Create a fake Instagram post',
 
