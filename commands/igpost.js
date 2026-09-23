@@ -17,8 +17,7 @@ const STYLE = {
     },
 };
 
-const DEFAULT_AVATAR = 'https://iili.io/CSAJ38v.jpg';
-const DEFAULT_POST_IMAGE = 'https://iili.io/CQl8srF.jpg'; // image de secours
+const DEFAULT_AVATAR = 'https://files.catbox.moe/w1wsfq.jpg'; // Avatar par défaut si pas de photo de profil
 
 // ═══════════════════════════════════════
 // FONCTIONS UTILITAIRES
@@ -38,7 +37,7 @@ async function downloadImageFromMessage(sock, msg) {
         }
         return buffer.length > 0 ? buffer : null;
     } catch (err) {
-        console.log('⚠️ Erreur téléchargement image réponse:', err.message);
+        console.log('⚠️ Error downloading image from reply:', err.message);
         return null;
     }
 }
@@ -48,12 +47,39 @@ async function downloadImageFromUrl(url) {
         const response = await axios.get(url, {
             responseType: 'arraybuffer',
             timeout: 30000,
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            },
         });
         const buffer = Buffer.from(response.data);
         return buffer.length > 0 ? buffer : null;
     } catch (err) {
-        console.log('⚠️ Erreur téléchargement image URL:', err.message);
+        console.log('⚠️ Error downloading image from URL:', err.message);
+        return null;
+    }
+}
+
+async function uploadImageToTemp(buffer) {
+    try {
+        // Upload vers tmpfiles.org (gratuit et fiable)
+        const FormData = require('form-data');
+        const form = new FormData();
+        form.append('file', buffer, {
+            filename: `igpost_${Date.now()}.jpg`,
+            contentType: 'image/jpeg',
+        });
+        
+        const response = await axios.post('https://tmpfiles.org/api/v1/upload', form, {
+            headers: form.getHeaders(),
+            timeout: 30000,
+        });
+        
+        if (response.data?.data?.url) {
+            return response.data.data.url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+        }
+        return null;
+    } catch (err) {
+        console.log('⚠️ Upload error:', err.message);
         return null;
     }
 }
@@ -64,7 +90,10 @@ async function getDisplayName(sock, jid) {
         if (name && /^\d+$/.test(name)) name = null;
         if (name && name.trim().length > 0) return name.trim();
     } catch (_) {}
-    return 'user';
+    
+    // Fallback : numéro formaté
+    const num = jid.split('@')[0].split(':')[0];
+    return `+${num}`;
 }
 
 // ═══════════════════════════════════════
@@ -75,25 +104,59 @@ module.exports = {
     name: 'igpost',
     aliases: ['instapost', 'ig', 'fakepost'],
     category: 'fun',
-    description: 'Crée une fausse publication Instagram',
+    description: 'Create a fake Instagram post',
 
     async execute({ sock, msg, args, jid }) {
         const senderJid = msg.key.participant || msg.key.remoteJid;
         const from = jid || msg.key.remoteJid;
 
-        // Réaction "génération en cours"
+        // ---- Check if we have an image ----
+        let hasQuotedImage = false;
+        try {
+            const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quoted?.imageMessage) {
+                hasQuotedImage = true;
+            }
+        } catch (_) {}
+
+        // Check for URL in arguments
+        let urlImage = null;
+        for (const arg of args) {
+            if (arg.startsWith('http://') || arg.startsWith('https://')) {
+                urlImage = arg;
+                break;
+            }
+        }
+
+        // If no image provided (neither reply nor URL), show help
+        if (!hasQuotedImage && !urlImage) {
+            return sock.sendMessage(from, {
+                text: '❌ *Usage:*\n\n' +
+                      'Reply to an image with:\n' +
+                      '`.igpost [text] [likes]`\n\n' +
+                      'Or provide an image URL:\n' +
+                      '`.igpost [text] [likes] [image-url]`\n\n' +
+                      '*Examples:*\n' +
+                      '`.igpost Hello World` (reply to image)\n' +
+                      '`.igpost Hello World 50000 https://example.com/image.jpg`\n' +
+                      '`.igpost Hello|50000 https://example.com/image.jpg`',
+                contextInfo: STYLE,
+            }, { quoted: msg });
+        }
+
+        // Loading reaction
         try { await sock.sendMessage(from, { react: { text: '⏳', key: msg.key } }); } catch (_) {}
 
-        // ---- Analyse des arguments ----
-        // Format attendu : .igpost text|likes [urlImage]
-        // ou simplement .igpost text [urlImage]
+        // ---- Parse arguments ----
         let text = 'Hello';
         let likeCount = 30000;
         let likeText = 'Likes';
-        let urlImage = null;
 
-        if (args.length > 0) {
-            const firstArg = args[0];
+        // Remove URL from args for parsing
+        const argsWithoutUrl = args.filter(arg => !arg.startsWith('http'));
+        
+        if (argsWithoutUrl.length > 0) {
+            const firstArg = argsWithoutUrl[0];
             if (firstArg.includes('|')) {
                 const parts = firstArg.split('|');
                 text = parts[0]?.trim() || 'Hello';
@@ -103,68 +166,51 @@ module.exports = {
                 }
             } else {
                 text = firstArg.trim();
-                // Vérifier si le second argument est un nombre (likes)
-                if (args[1] && !isNaN(parseInt(args[1]))) {
-                    likeCount = parseInt(args[1]);
-                    // Le troisième argument pourrait être l'URL de l'image
-                    if (args[2] && args[2].startsWith('http')) {
-                        urlImage = args[2];
-                    }
-                } else if (args[1] && args[1].startsWith('http')) {
-                    // Le second argument est l'URL de l'image
-                    urlImage = args[1];
+                // Check if second argument is likes count
+                if (argsWithoutUrl[1] && !isNaN(parseInt(argsWithoutUrl[1]))) {
+                    likeCount = parseInt(argsWithoutUrl[1]);
                 }
             }
         }
 
-        // Détecter si une URL d'image est fournie dans les arguments
-        for (const arg of args.slice(1)) {
-            if (arg.startsWith('http')) {
-                urlImage = arg;
-                break;
-            }
-        }
-
-        // Récupération du nom d'utilisateur
+        // ---- Get username ----
         const username = await getDisplayName(sock, senderJid);
 
-        // Récupération de l'avatar
+        // ---- Get avatar ----
         let avatarUrl = DEFAULT_AVATAR;
         try {
             avatarUrl = await sock.profilePictureUrl(senderJid, 'image');
-        } catch (_) {}
-
-        // Récupération de l'image de publication
-        let postImageBuffer = null;
-        let postImageUrl = urlImage;
-
-        // Priorité : image répondue > URL fournie > avatar utilisateur > image par défaut
-        postImageBuffer = await downloadImageFromMessage(sock, msg);
-        if (!postImageBuffer && urlImage) {
-            postImageBuffer = await downloadImageFromUrl(urlImage);
+        } catch (_) {
+            // Use default avatar
         }
 
-        if (postImageBuffer) {
-            // On a une image téléchargée ; on peut l'utiliser directement.
-            // Mais l'API attend une URL. On va devoir téléverser l'image quelque part.
-            // Pour simplifier, on va utiliser l'URL de l'image si elle est fournie, sinon on utilisera l'avatar.
-            // Si on a un buffer (image de réponse), il faudrait l'uploader. On va plutôt utiliser le buffer directement ? Non, l'API attend une URL.
-            // On va se contenter de : si URL fournie → utiliser l'URL ; sinon utiliser l'avatar comme postImage.
-            // Pour le buffer de réponse, on peut l'ignorer et utiliser l'avatar comme fallback.
-            // Ce n'est pas idéal, mais l'API Stellar ne prend pas de buffer.
-            // On va donc privilégier l'URL si elle existe, sinon on utilisera l'avatar.
-            // Si l'utilisateur a répondu à une image, on ne peut pas l'envoyer directement, donc on utilisera l'avatar.
-            // Pour simplifier, on va utiliser l'avatar comme postImage si aucune URL n'est fournie.
-            postImageUrl = urlImage || avatarUrl;
-        } else {
-            // Aucune image fournie : on utilise l'avatar
+        // ---- Get post image ----
+        let postImageUrl = null;
+
+        // Priority 1: Reply with image
+        if (hasQuotedImage) {
+            const imageBuffer = await downloadImageFromMessage(sock, msg);
+            if (imageBuffer) {
+                // Upload to temporary service
+                postImageUrl = await uploadImageToTemp(imageBuffer);
+            }
+        }
+
+        // Priority 2: URL in arguments
+        if (!postImageUrl && urlImage) {
+            // Verify the URL works
+            const testBuffer = await downloadImageFromUrl(urlImage);
+            if (testBuffer) {
+                postImageUrl = urlImage;
+            }
+        }
+
+        // If still no image, use avatar as fallback
+        if (!postImageUrl) {
             postImageUrl = avatarUrl;
         }
 
-        // Si on a une URL d'image mais pas de buffer, on peut l'utiliser telle quelle.
-        if (urlImage) postImageUrl = urlImage;
-
-        // Construction de l'URL API
+        // ---- Build API URL ----
         const apiUrl = `https://api.stellarwa.xyz/generate/instagram?` +
             `username=${encodeURIComponent(username)}` +
             `&avatar=${encodeURIComponent(avatarUrl)}` +
@@ -174,38 +220,37 @@ module.exports = {
             `&key=api-HBpdn`;
 
         try {
-            console.log('🎨 Génération Instagram via Stellar...');
+            console.log('🎨 Generating Instagram post via Stellar...');
             const response = await axios.get(apiUrl, {
                 responseType: 'arraybuffer',
-                timeout: 60000, // l'API peut prendre du temps
-                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 60000,
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
             });
 
             const buffer = Buffer.from(response.data);
 
-            // Vérification de la taille
             if (!buffer || buffer.length < 1000) {
-                throw new Error('Image générée trop petite ou vide');
+                throw new Error('Generated image too small or empty');
             }
 
-            // Envoi de l'image générée
+            // Send generated image
             await sock.sendMessage(from, {
                 image: buffer,
                 caption: `📸 *Instagram Post*\n\n` +
                          `👤 *User:* ${username}\n` +
-                         `❤️ *Likes:* ${likeCount}\n` +
+                         `❤️ *Likes:* ${likeCount.toLocaleString('en-US')}\n` +
                          `💬 *Caption:* ${text}\n\n` +
                          `⚡ _Generated by Cybernova_`,
                 contextInfo: STYLE,
             }, { quoted: msg });
 
-            // Réaction succès
+            // Success reaction
             try { await sock.sendMessage(from, { react: { text: '✅', key: msg.key } }); } catch (_) {}
 
         } catch (err) {
-            console.error('❌ Erreur igpost:', err.message);
+            console.error('❌ IGPost error:', err.message);
 
-            // Réaction erreur
+            // Error reaction
             try { await sock.sendMessage(from, { react: { text: '❌', key: msg.key } }); } catch (_) {}
 
             await sock.sendMessage(from, {
