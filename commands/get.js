@@ -17,7 +17,7 @@ const STYLE = {
 };
 
 // ═══════════════════════════════════════
-// JID UTILS (compatibles avec main.js)
+// JID UTILS
 // ═══════════════════════════════════════
 
 function normalizeJid(jid) {
@@ -35,16 +35,15 @@ function getRawNumber(jid) {
 }
 
 // ═══════════════════════════════════════
-// VÉRIFICATION OWNER (basée sur main.js)
+// VÉRIFICATION OWNER
 // ═══════════════════════════════════════
 
 function isBotOwner(sock, senderJid) {
     if (!senderJid) return false;
-    
+
     const senderRaw = getRawNumber(senderJid);
     const senderNormalized = normalizeJid(senderJid);
 
-    // 1. Vérifier si c'est le bot lui-même
     const botIds = [];
     if (sock.user?.id) {
         botIds.push(normalizeJid(sock.user.id));
@@ -54,17 +53,14 @@ function isBotOwner(sock, senderJid) {
         botIds.push(normalizeJid(sock.user.lid));
         botIds.push(getRawNumber(sock.user.lid));
     }
-    
+
     if (botIds.includes(senderNormalized) || botIds.includes(senderRaw)) {
         return true;
     }
 
-    // 2. Vérifier via le système d'owners du main.js
     try {
-        // Importer les fonctions du main.js
         const main = require('../main.js');
         if (main && typeof main.isBotOwner === 'function') {
-            // Déterminer la clé du bot (main ou numéro du subbot)
             let botKey = 'main';
             if (sock.user?.id) {
                 const rawNumber = getRawNumber(sock.user.id);
@@ -74,15 +70,11 @@ function isBotOwner(sock, senderJid) {
             }
             return main.isBotOwner(sock, botKey, senderJid);
         }
-    } catch (_) {
-        // Fallback si main.js n'est pas disponible
-    }
+    } catch (_) {}
 
-    // 3. Vérifier via global.subBots (si disponible)
     if (global.subBots && global.subBots instanceof Map) {
         for (const [subNumber, subData] of global.subBots) {
             if (subData.sock === sock) {
-                // Vérifier si le sender est owner de ce subbot
                 const subState = global.botStates?.get(subNumber);
                 if (subState && subState.owners) {
                     for (const owner of subState.owners) {
@@ -96,13 +88,11 @@ function isBotOwner(sock, senderJid) {
         }
     }
 
-    // 4. Vérifier l'owner configuré (via CONFIG ou process.env)
     const ownerNumber = process.env.OWNER_NUMBER || '50935729494';
     if (senderRaw === ownerNumber || senderNormalized === `${ownerNumber}@s.whatsapp.net`) {
         return true;
     }
 
-    // 5. Vérifier l'OWNER_LID du config
     try {
         const main = require('../main.js');
         if (main && main.CONFIG && main.CONFIG.OWNER_LID) {
@@ -117,61 +107,56 @@ function isBotOwner(sock, senderJid) {
 }
 
 // ═══════════════════════════════════════
-// RECHERCHE DU FICHIER
+// RECHERCHE DE TOUS LES FICHIERS CORRESPONDANTS
 // ═══════════════════════════════════════
 
-function findFile(name) {
+// Ordre de priorité : command, event, util, root
+const SEARCH_DIRS = [
+    { dir: 'commands', type: 'command', icon: '⚡', label: 'CMD' },
+    { dir: 'events',   type: 'event',   icon: '🎯', label: 'EVENT' },
+    { dir: 'utils',    type: 'util',    icon: '🔧', label: 'UTIL' },
+];
+
+function findAllMatches(name) {
     const searchName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    const matches = [];
 
-    // Chercher dans ./commands/
-    const commandsDir = path.join(process.cwd(), 'commands');
-    if (fs.existsSync(commandsDir)) {
-        const files = fs.readdirSync(commandsDir).filter(f => f.endsWith('.js'));
+    for (const { dir, type, icon, label } of SEARCH_DIRS) {
+        const dirPath = path.join(process.cwd(), dir);
+        if (!fs.existsSync(dirPath)) continue;
+
+        const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.js'));
         for (const file of files) {
             const baseName = file.replace('.js', '').toLowerCase();
             if (baseName === searchName) {
-                return { path: path.join(commandsDir, file), type: 'command' };
+                matches.push({
+                    path: path.join(dirPath, file),
+                    type,
+                    icon,
+                    label,
+                    name: file.replace('.js', ''),
+                    fileName: file,
+                });
             }
         }
     }
 
-    // Chercher dans ./events/
-    const eventsDir = path.join(process.cwd(), 'events');
-    if (fs.existsSync(eventsDir)) {
-        const files = fs.readdirSync(eventsDir).filter(f => f.endsWith('.js'));
-        for (const file of files) {
-            const baseName = file.replace('.js', '').toLowerCase();
-            if (baseName === searchName) {
-                return { path: path.join(eventsDir, file), type: 'event' };
-            }
+    // main.js à la racine
+    if (searchName === 'main') {
+        const mainPath = path.join(process.cwd(), 'main.js');
+        if (fs.existsSync(mainPath)) {
+            matches.push({
+                path: mainPath,
+                type: 'root',
+                icon: '📦',
+                label: 'ROOT',
+                name: 'main',
+                fileName: 'main.js',
+            });
         }
     }
 
-    // Chercher dans ./utils/
-    const utilsDir = path.join(process.cwd(), 'utils');
-    if (fs.existsSync(utilsDir)) {
-        const files = fs.readdirSync(utilsDir).filter(f => f.endsWith('.js'));
-        for (const file of files) {
-            const baseName = file.replace('.js', '').toLowerCase();
-            if (baseName === searchName) {
-                return { path: path.join(utilsDir, file), type: 'util' };
-            }
-        }
-    }
-
-    // Chercher à la racine
-    const rootDir = process.cwd();
-    if (fs.existsSync(rootDir)) {
-        const files = fs.readdirSync(rootDir).filter(f => f.endsWith('.js') && !f.startsWith('node_modules'));
-        for (const file of files) {
-            const baseName = file.replace('.js', '').toLowerCase();
-            if (baseName === searchName) {
-                return { path: path.join(rootDir, file), type: 'root' };
-            }
-        }
-    }
-
-    return null;
+    return matches;
 }
 
 // ═══════════════════════════════════════
@@ -192,12 +177,101 @@ function listAvailableFiles() {
         }
     }
 
-    // Ajouter main.js
     if (fs.existsSync(path.join(process.cwd(), 'main.js'))) {
         files.push({ name: 'main', type: 'root' });
     }
 
     return files;
+}
+
+// ═══════════════════════════════════════
+// PARSING DES ARGUMENTS
+// ═══════════════════════════════════════
+
+// Formats supportés :
+//   .get <name>             → 1er match, document
+//   .get <name> <num>       → Nième match, document
+//   .get 2 <name>           → 1er match, texte
+//   .get 2 <name> <num>     → Nième match, texte
+//   .get 1 <name>           → 1er match, document (explicite)
+function parseGetArgs(args) {
+    let formatMode = 'document'; // 'document' ou 'text'
+    let matchIndex = 0;          // 0-based
+    const nameParts = [];
+
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        const isNumber = /^\d+$/.test(arg);
+
+        // Premier argument : mode de format (1=doc, 2=texte)
+        if (i === 0 && isNumber) {
+            const mode = parseInt(arg);
+            if (mode === 1) formatMode = 'document';
+            else if (mode === 2) formatMode = 'text';
+            continue;
+        }
+
+        // Dernier argument numérique : index du match
+        if (i === args.length - 1 && isNumber && nameParts.length > 0) {
+            matchIndex = Math.max(0, parseInt(arg) - 1);
+            continue;
+        }
+
+        // Sinon c'est une partie du nom
+        nameParts.push(arg);
+    }
+
+    return {
+        formatMode,
+        matchIndex,
+        name: nameParts.join(' ').trim(),
+    };
+}
+
+// ═══════════════════════════════════════
+// ENVOI EN TEXTE (avec découpage si trop long)
+// ═══════════════════════════════════════
+
+const MAX_TEXT_CHUNK = 12000; // Limite WhatsApp ~65000, on garde une marge
+
+async function sendCodeAsText(sock, jid, code, fileInfo, msg) {
+    const lines = code.split('\n').length;
+    const sizeKB = (Buffer.byteLength(code) / 1024).toFixed(2);
+
+    // Header
+    await sock.sendMessage(jid, {
+        text:
+            `${fileInfo.icon} *Source Code — ${fileInfo.label}*\n\n` +
+            `📄 *File:* ${fileInfo.fileName}\n` +
+            `📁 *Type:* ${fileInfo.type}\n` +
+            `📏 *Size:* ${sizeKB} KB\n` +
+            `📊 *Lines:* ${lines}\n` +
+            `📝 *Mode:* Text\n\n` +
+            `_Sending below..._`,
+        contextInfo: STYLE,
+    }, { quoted: msg });
+
+    // Découper si trop long
+    if (code.length <= MAX_TEXT_CHUNK) {
+        await sock.sendMessage(jid, {
+            text: '```javascript\n' + code + '\n```',
+        });
+    } else {
+        let offset = 0;
+        let part = 1;
+        const totalParts = Math.ceil(code.length / MAX_TEXT_CHUNK);
+
+        while (offset < code.length) {
+            const chunk = code.substring(offset, offset + MAX_TEXT_CHUNK);
+            await sock.sendMessage(jid, {
+                text: `*Part ${part}/${totalParts}*\n\`\`\`javascript\n${chunk}\n\`\`\``,
+            });
+            offset += MAX_TEXT_CHUNK;
+            part++;
+            // Petit délai pour éviter le spam
+            await new Promise(r => setTimeout(r, 800));
+        }
+    }
 }
 
 // ═══════════════════════════════════════
@@ -209,19 +283,18 @@ module.exports = {
     aliases: ['getcode', 'source', 'src', 'code'],
     category: 'owner',
 
-    async execute({ sock, msg, args, jid, senderJid, config }) {
+    async execute({ sock, msg, args, jid, senderJid }) {
         // Vérifier si l'utilisateur est owner
         if (!isBotOwner(sock, senderJid)) {
-            // Répondre silencieusement (ou pas du tout)
             return;
         }
 
-        const name = args[0];
-
-        // Si aucun nom, afficher la liste des fichiers disponibles
-        if (!name) {
+        // ─────────────────────────────────
+        // Sans arguments : liste des fichiers
+        // ─────────────────────────────────
+        if (!args || args.length === 0) {
             const files = listAvailableFiles();
-            
+
             if (files.length === 0) {
                 return sock.sendMessage(jid, {
                     text: '📂 *No source files found.*',
@@ -229,7 +302,6 @@ module.exports = {
                 }, { quoted: msg });
             }
 
-            // Grouper par type
             const grouped = {};
             for (const file of files) {
                 if (!grouped[file.type]) grouped[file.type] = [];
@@ -239,11 +311,21 @@ module.exports = {
             let response = '📂 *Available Source Files*\n\n';
             for (const [type, names] of Object.entries(grouped)) {
                 response += `📁 *${type}*\n`;
-                response += names.map(n => `  • ${n}`).join('\n');
+                response += names.sort().map(n => `  • ${n}`).join('\n');
                 response += '\n\n';
             }
-            response += '💡 *Usage:* .get <filename>\n';
-            response += '📝 *Example:* .get gemini';
+
+            response +=
+                '💡 *Usage:*\n' +
+                '• `.get <name>` — 1st match, document\n' +
+                '• `.get <name> 2` — 2nd match (e.g. event), document\n' +
+                '• `.get 2 <name>` — 1st match, text in chat\n' +
+                '• `.get 2 <name> 2` — 2nd match, text\n\n' +
+                '📝 *Examples:*\n' +
+                '• `.get welcome` (command)\n' +
+                '• `.get welcome 2` (event)\n' +
+                '• `.get 2 play` (text)\n' +
+                '• `.get 2 welcome 2` (event as text)';
 
             return sock.sendMessage(jid, {
                 text: response,
@@ -251,11 +333,24 @@ module.exports = {
             }, { quoted: msg });
         }
 
-        // Rechercher le fichier
-        const fileInfo = findFile(name);
+        // ─────────────────────────────────
+        // Parse arguments
+        // ─────────────────────────────────
+        const { formatMode, matchIndex, name } = parseGetArgs(args);
 
-        if (!fileInfo) {
-            // Proposer des fichiers similaires
+        if (!name) {
+            return sock.sendMessage(jid, {
+                text: '❌ *No file name provided.*\n\nUsage: `.get [1|2] <name> [index]`',
+                contextInfo: STYLE,
+            }, { quoted: msg });
+        }
+
+        // ─────────────────────────────────
+        // Recherche des correspondances
+        // ─────────────────────────────────
+        const matches = findAllMatches(name);
+
+        if (matches.length === 0) {
             const files = listAvailableFiles();
             const similar = files
                 .filter(f => f.name.toLowerCase().includes(name.toLowerCase()))
@@ -272,30 +367,58 @@ module.exports = {
             }, { quoted: msg });
         }
 
+        // ─────────────────────────────────
+        // Index hors limites
+        // ─────────────────────────────────
+        if (matchIndex >= matches.length) {
+            let message = `❌ *Index ${matchIndex + 1} out of range*\n\n`;
+            message += `Found *${matches.length}* match(es) for "${name}":\n\n`;
+            matches.forEach((m, i) => {
+                message += `*${i + 1}.* ${m.icon} ${m.label} → \`${m.fileName}\`\n`;
+            });
+            message += `\n💡 *Usage:* .get ${name} ${matchIndex + 1}`;
+
+            return sock.sendMessage(jid, {
+                text: message,
+                contextInfo: STYLE,
+            }, { quoted: msg });
+        }
+
+        // ─────────────────────────────────
+        // Sélection du fichier
+        // ─────────────────────────────────
+        const fileInfo = matches[matchIndex];
+
         try {
             const code = fs.readFileSync(fileInfo.path, 'utf8');
-            const fileName = path.basename(fileInfo.path);
             const sizeKB = (Buffer.byteLength(code) / 1024).toFixed(2);
             const lines = code.split('\n').length;
 
-            // Type d'icône
-            const icons = {
-                'command': '⚡',
-                'event': '🎯',
-                'util': '🔧',
-                'root': '📦'
-            };
-            const icon = icons[fileInfo.type] || '📄';
+            // ─────────────────────────────────
+            // MODE TEXTE
+            // ─────────────────────────────────
+            if (formatMode === 'text') {
+                await sendCodeAsText(sock, jid, code, fileInfo, msg);
+                return;
+            }
 
-            // Envoyer le code comme document
+            // ─────────────────────────────────
+            // MODE DOCUMENT (défaut)
+            // ─────────────────────────────────
+            let infoLine = '';
+            if (matches.length > 1) {
+                infoLine = `🔖 *Match:* ${matchIndex + 1}/${matches.length}\n`;
+            }
+
             await sock.sendMessage(jid, {
                 document: Buffer.from(code, 'utf8'),
                 mimetype: 'application/javascript',
-                fileName: fileName,
+                fileName: fileInfo.fileName,
                 caption:
-                    `${icon} *Source Code*\n\n` +
-                    `📄 *File:* ${fileName}\n` +
+                    `${fileInfo.icon} *Source Code — ${fileInfo.label}*\n\n` +
+                    `📄 *File:* ${fileInfo.fileName}\n` +
                     `📁 *Type:* ${fileInfo.type}\n` +
+                    infoLine +
                     `📏 *Size:* ${sizeKB} KB\n` +
                     `📊 *Lines:* ${lines}\n\n` +
                     '⚡ _Zenitsu_',
@@ -304,7 +427,7 @@ module.exports = {
 
         } catch (err) {
             console.error('❌ get error:', err.message);
-            
+
             return sock.sendMessage(jid, {
                 text: `❌ *Error reading file:* ${err.message}`,
                 contextInfo: STYLE,
