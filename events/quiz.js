@@ -14,13 +14,13 @@ const LANGUAGES = {
     ar: 'ar', ru: 'ru', ja: 'ja', zh: 'zh', ht: 'ht', ko: 'ko',
 };
 const DEFAULT_LANG = 'fr';
-const QUESTIONS_PER_QUIZ = 20;
+const QUESTIONS_PER_QUIZ = 10; // Réduit pour éviter les bugs
 const MAX_PARTICIPANTS = 20;
 const MIN_PARTICIPANTS = 2;
 const JOIN_WAIT_MS = 60_000;        // 60 secondes pour rejoindre
-const QUESTION_TIME_MS = 10_000;    // 10 secondes par question
-const INTER_QUESTION_MS = 25_000;   // 25 secondes entre questions
-const FAKE_TYPING_MS = 5_000;       // 5 secondes de fake typing
+const QUESTION_TIME_MS = 15_000;    // 15 secondes par question (au lieu de 10)
+const INTER_QUESTION_MS = 5_000;    // 5 secondes entre questions (réduit)
+const FAKE_TYPING_MS = 2_000;       // 2 secondes de fake typing (réduit)
 
 // ═══════════════════════════════════════
 // STYLE
@@ -55,13 +55,16 @@ function createSession(chatJid, topic, lang, questions) {
         currentIndex: 0,
         participants: new Set(),        // JIDs des participants ready
         scores: new Map(),              // JID -> points
-        answers: new Map(),             // JID -> réponse (pour la question en cours)
+        answers: new Map(),             // JID -> { answer, timestamp }
         status: 'waiting',              // waiting, playing, finished, cancelled
         questionTimer: null,
         joinTimer: null,
         interQuestionTimer: null,
         fakeTypingTimer: null,
         starter: null,                  // JID du lanceur
+        questionStartTime: 0,           // Timestamp du début de la question
+        correctAnswer: null,            // Bonne réponse (1-based)
+        questionAnswered: false,        // Flag pour éviter les doubles réponses
     };
     sessions.set(chatJid, session);
     return session;
@@ -85,35 +88,33 @@ function deleteSession(chatJid) {
 async function translate(text, targetLang) {
     if (targetLang === DEFAULT_LANG || !text) return text;
 
-    // API Google Translate non officielle
     try {
         const { data } = await axios.get(
             `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
-            { timeout: 10000 }
+            { timeout: 8000 }
         );
         const translated = data?.[0]?.map(seg => seg[0]).join('');
-        if (translated) return translated;
+        if (translated && translated !== text) return translated;
     } catch (_) {}
 
-    // Fallback MyMemory
     try {
         const { data } = await axios.get(
             `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=fr|${targetLang}`,
-            { timeout: 10000 }
+            { timeout: 8000 }
         );
         if (data?.responseData?.translatedText) {
             return data.responseData.translatedText;
         }
     } catch (_) {}
 
-    return text; // dernier recours : texte original
+    return text;
 }
 
 async function translateBatch(texts, targetLang) {
     const results = [];
     for (const t of texts) {
         results.push(await translate(t, targetLang));
-        await new Promise(r => setTimeout(r, 200)); // petit délai anti-ban
+        await new Promise(r => setTimeout(r, 100));
     }
     return results;
 }
@@ -126,13 +127,20 @@ function loadQuestions(topic) {
     const filePath = path.join(QUIZ_DIR, `${topic.toLowerCase()}.json`);
     if (!fs.existsSync(filePath)) return null;
     try {
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return Array.isArray(data) ? data : null;
     } catch (_) {
         return null;
     }
 }
 
-// Mélange aléatoire (Fisher-Yates)
+function getAvailableTopics() {
+    if (!fs.existsSync(QUIZ_DIR)) return [];
+    return fs.readdirSync(QUIZ_DIR)
+        .filter(f => f.endsWith('.json'))
+        .map(f => f.replace('.json', ''));
+}
+
 function shuffleArray(arr) {
     const a = [...arr];
     for (let i = a.length - 1; i > 0; i--) {
@@ -147,13 +155,18 @@ function shuffleArray(arr) {
 // ═══════════════════════════════════════
 
 async function sendMessage(sock, jid, text, mentions = []) {
-    return sock.sendMessage(jid, {
-        text,
-        contextInfo: {
-            mentionedJid: mentions.length ? mentions : undefined,
-            ...STYLE,
-        },
-    });
+    try {
+        return await sock.sendMessage(jid, {
+            text,
+            contextInfo: {
+                mentionedJid: mentions.length ? mentions : [],
+                ...STYLE,
+            },
+        });
+    } catch (err) {
+        console.error('❌ Quiz sendMessage error:', err.message);
+        return null;
+    }
 }
 
 async function sendTyping(sock, jid) {
@@ -165,15 +178,59 @@ async function sendTyping(sock, jid) {
 }
 
 // ═══════════════════════════════════════
+// RÉSOLUTION DU NOM D'UTILISATEUR
+// ═══════════════════════════════════════
+
+async function getDisplayName(sock, jid) {
+    try {
+        // Essayer d'obtenir le nom via le contact
+        let name = null;
+        
+        // Méthode 1 : sock.getName()
+        try {
+            name = await sock.getName(jid);
+        } catch (_) {}
+
+        // Méthode 2 : contact dans le message
+        if (!name || /^\d+$/.test(name)) {
+            try {
+                const contact = await sock.getContact(jid);
+                if (contact?.name && !/^\d+$/.test(contact.name)) {
+                    name = contact.name;
+                } else if (contact?.notify && !/^\d+$/.test(contact.notify)) {
+                    name = contact.notify;
+                }
+            } catch (_) {}
+        }
+
+        // Vérification finale
+        if (name && name.trim().length > 0 && !/^\d+$/.test(name.trim())) {
+            return name.trim();
+        }
+    } catch (_) {}
+
+    // Fallback : numéro de téléphone formaté
+    const num = jid.split('@')[0].split(':')[0];
+    return `+${num}`;
+}
+
+function getMentionJid(jid) {
+    // Convertir en format @s.whatsapp.net pour les mentions
+    const raw = jid.split('@')[0].split(':')[0];
+    return `${raw}@s.whatsapp.net`;
+}
+
+// ═══════════════════════════════════════
 // GESTION DU QUIZ
 // ═══════════════════════════════════════
 
 function getOptions(question) {
-    // Bonne réponse + 4 fausses choisies aléatoirement parmi les 10
     const fakes = [];
     for (let i = 1; i <= 10; i++) {
         const fake = question[`fa${i}`];
-        if (fake) fakes.push(fake);
+        if (fake && typeof fake === 'string' && fake.trim().length > 0) {
+            fakes.push(fake);
+        }
     }
     const selectedFakes = shuffleArray(fakes).slice(0, 4);
     const all = [question.a, ...selectedFakes];
@@ -181,81 +238,164 @@ function getOptions(question) {
 }
 
 async function sendQuestion(sock, session) {
-    const q = session.questions[session.currentIndex];
-    const opts = getOptions(q);
-    const correctIndex = opts.indexOf(q.a); // 0-based
-    const optNumber = i => i + 1;
+    try {
+        // Vérifier si on a encore des questions valides
+        while (session.currentIndex < session.questions.length) {
+            const q = session.questions[session.currentIndex];
+            
+            // Valider la question
+            if (!q || !q.q1 || !q.a || typeof q.q1 !== 'string' || typeof q.a !== 'string') {
+                console.log('⚠️ Question invalide, passage à la suivante');
+                session.currentIndex++;
+                continue;
+            }
 
-    // Traduction de la question et des options
-    const textToTranslate = [q.q1, ...opts];
-    const translated = await translateBatch(textToTranslate, session.lang);
-    const questionText = translated[0];
-    const optionTexts = translated.slice(1);
+            const opts = getOptions(q);
+            if (opts.length < 2 || !opts.includes(q.a)) {
+                console.log('⚠️ Options invalides, passage à la suivante');
+                session.currentIndex++;
+                continue;
+            }
 
-    let msg =
-        `📝 *Question ${session.currentIndex + 1}/${session.questions.length}*\n\n` +
-        `${questionText}\n\n`;
+            const correctIndex = opts.indexOf(q.a);
+            session.correctAnswer = correctIndex + 1;
+            session.questionAnswered = false;
+            session.answers.clear();
+            session.questionStartTime = Date.now();
 
-    optionTexts.forEach((opt, i) => {
-        msg += `${i + 1}- ${opt}\n`;
-    });
+            // Traduction
+            let questionText = q.q1;
+            let optionTexts = opts;
+            
+            if (session.lang !== DEFAULT_LANG) {
+                try {
+                    const translated = await translateBatch([q.q1, ...opts], session.lang);
+                    questionText = translated[0] || q.q1;
+                    optionTexts = translated.slice(1).map((t, i) => t || opts[i]);
+                } catch (_) {
+                    // Utiliser les textes originaux
+                }
+            }
 
-    msg += `\n⏳ *10 secondes pour répondre !*`;
+            let msg = `📝 *Question ${session.currentIndex + 1}/${session.questions.length}*\n\n`;
+            msg += `${questionText}\n\n`;
 
-    await sendMessage(sock, session.chatJid, msg, [...session.participants]);
-    session.correctAnswer = correctIndex + 1; // 1-based
-    session.answers.clear();
+            optionTexts.forEach((opt, i) => {
+                msg += `${i + 1}${String.fromCharCode(0x20E3)} ${opt}\n`;
+            });
 
-    // Démarrer le timer de question
-    session.questionTimer = setTimeout(async () => {
-        await handleQuestionEnd(sock, session);
-    }, QUESTION_TIME_MS);
+            msg += `\n⏳ *15 secondes pour répondre !*\n`;
+            msg += `_Envoyez le numéro de votre réponse (1-${opts.length})_`;
+
+            await sendMessage(sock, session.chatJid, msg, [...session.participants].map(getMentionJid));
+
+            // Timer de question
+            if (session.questionTimer) clearTimeout(session.questionTimer);
+            session.questionTimer = setTimeout(async () => {
+                await handleQuestionEnd(sock, session);
+            }, QUESTION_TIME_MS);
+
+            return;
+        }
+
+        // Plus de questions valides
+        if (session.currentIndex >= session.questions.length) {
+            await endQuiz(sock, session);
+        }
+    } catch (err) {
+        console.error('❌ sendQuestion error:', err.message);
+        session.currentIndex++;
+        if (session.currentIndex < session.questions.length) {
+            await sendQuestion(sock, session);
+        } else {
+            await endQuiz(sock, session);
+        }
+    }
 }
 
 async function handleQuestionEnd(sock, session) {
     // Empêcher double appel
-    if (!session.questionTimer) return;
-    clearTimeout(session.questionTimer);
-    session.questionTimer = null;
+    if (session.questionAnswered) return;
+    session.questionAnswered = true;
+
+    if (session.questionTimer) {
+        clearTimeout(session.questionTimer);
+        session.questionTimer = null;
+    }
 
     const correct = session.correctAnswer;
     const correctResponders = [];
-    for (const [jid, ans] of session.answers.entries()) {
-        if (ans === correct) correctResponders.push(jid);
+
+    // Analyser les réponses
+    for (const [jid, answer] of session.answers.entries()) {
+        if (answer === correct) {
+            correctResponders.push(jid);
+        }
     }
 
-    // Tri des bonnes réponses par ordre d'arrivée
-    // session.answers est une Map, l'ordre d'insertion est conservé,
-    // donc les premiers entrants sont les plus rapides.
-    const pointsToAward = [5, 3, 1]; // 1er=5, 2e=3, 3e+=1
-    let resultMsg = '';
-    const mentions = [];
-
-    for (let i = 0; i < correctResponders.length; i++) {
-        const jid = correctResponders[i];
-        const pts = i === 0 ? 5 : i === 1 ? 3 : 1;
-        session.scores.set(jid, (session.scores.get(jid) || 0) + pts);
-        mentions.push(jid);
-        resultMsg += `@${jid.split('@')[0].split(':')[0]} => +${pts} ✅\n`;
-    }
-
-    resultMsg += `\n*Score:*\n`;
-    const sortedScores = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
-    const medals = ['🥇', '🥈', '🥉'];
-    sortedScores.forEach(([jid, score], i) => {
-        const medal = i < 3 ? medals[i] + ' ' : '';
-        resultMsg += `${medal}@${jid.split('@')[0].split(':')[0]} = ${score}\n`;
+    // Attribution des points
+    const pointsMap = new Map();
+    correctResponders.forEach((jid, index) => {
+        let points;
+        if (index === 0) points = 5;
+        else if (index === 1) points = 3;
+        else points = 1;
+        
+        pointsMap.set(jid, points);
+        session.scores.set(jid, (session.scores.get(jid) || 0) + points);
     });
 
-    await sendMessage(sock, session.chatJid, resultMsg, mentions);
+    // Création du message de résultats
+    let resultMsg = `✅ *Bonne réponse : ${correct}*\n\n`;
 
-    // Passer à la question suivante après un délai
+    if (correctResponders.length > 0) {
+        resultMsg += `🏆 *Gagnants :*\n`;
+        const mentions = [];
+        
+        for (const [jid, points] of pointsMap.entries()) {
+            const displayName = await getDisplayName(sock, jid);
+            resultMsg += `• ${displayName} : +${points} pts\n`;
+            mentions.push(getMentionJid(jid));
+        }
+
+        resultMsg += `\n📊 *Score actuel :*\n`;
+        const sortedScores = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
+        const medals = ['🥇', '🥈', '🥉'];
+        
+        for (let i = 0; i < sortedScores.length; i++) {
+            const [jid, score] = sortedScores[i];
+            const displayName = await getDisplayName(sock, jid);
+            const medal = i < 3 ? medals[i] + ' ' : '';
+            resultMsg += `${medal}${displayName} : ${score} pts\n`;
+        }
+
+        await sendMessage(sock, session.chatJid, resultMsg, mentions);
+    } else {
+        resultMsg += `😅 *Personne n'a trouvé la bonne réponse !*\n\n`;
+        resultMsg += `📊 *Score actuel :*\n`;
+        const sortedScores = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
+        
+        if (sortedScores.length > 0) {
+            const medals = ['🥇', '🥈', '🥉'];
+            for (let i = 0; i < sortedScores.length; i++) {
+                const [jid, score] = sortedScores[i];
+                const displayName = await getDisplayName(sock, jid);
+                const medal = i < 3 ? medals[i] + ' ' : '';
+                resultMsg += `${medal}${displayName} : ${score} pts\n`;
+            }
+        } else {
+            resultMsg += `_Aucun score pour le moment_`;
+        }
+
+        await sendMessage(sock, session.chatJid, resultMsg, []);
+    }
+
+    // Passer à la question suivante
     session.interQuestionTimer = setTimeout(async () => {
         session.currentIndex++;
         if (session.currentIndex >= session.questions.length) {
             await endQuiz(sock, session);
         } else {
-            // Fake typing
             await sendTyping(sock, session.chatJid);
             await sendQuestion(sock, session);
         }
@@ -263,15 +403,27 @@ async function handleQuestionEnd(sock, session) {
 }
 
 async function endQuiz(sock, session) {
+    if (session.status === 'finished') return;
     session.status = 'finished';
+
     const sorted = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
     let finalMsg = '🏁 *Quiz terminé !*\n\n';
     const medals = ['🥇', '🥈', '🥉'];
-    sorted.forEach(([jid, score], i) => {
-        const medal = i < 3 ? medals[i] + ' ' : '';
-        finalMsg += `${medal}@${jid.split('@')[0].split(':')[0]} => ${score}\n`;
-    });
-    await sendMessage(sock, session.chatJid, finalMsg, [...session.participants]);
+    const mentions = [];
+
+    if (sorted.length > 0) {
+        for (let i = 0; i < sorted.length; i++) {
+            const [jid, score] = sorted[i];
+            const displayName = await getDisplayName(sock, jid);
+            const medal = i < 3 ? medals[i] + ' ' : '';
+            finalMsg += `${medal}${displayName} : ${score} pts\n`;
+            mentions.push(getMentionJid(jid));
+        }
+    } else {
+        finalMsg += '_Aucun participant_';
+    }
+
+    await sendMessage(sock, session.chatJid, finalMsg, mentions);
     deleteSession(session.chatJid);
 }
 
@@ -285,7 +437,9 @@ async function quizMessageHandler(sock, update) {
         if (!msg.message) continue;
         const chatJid = msg.key.remoteJid;
         const senderJid = msg.key.participant || msg.key.remoteJid;
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+        const text = msg.message.conversation || 
+                     msg.message.extendedTextMessage?.text || 
+                     msg.message.imageMessage?.caption || '';
         if (!text) continue;
 
         const session = getSession(chatJid);
@@ -301,34 +455,74 @@ async function quizMessageHandler(sock, update) {
         }
 
         if (session.status === 'waiting') {
-            if (lower === 'quiz ready') {
+            if (lower === 'quiz ready' || lower === 'ready') {
                 if (!session.participants.has(senderJid) && session.participants.size < MAX_PARTICIPANTS) {
                     session.participants.add(senderJid);
                     session.scores.set(senderJid, 0);
-                    await sock.sendMessage(chatJid, {
-                        react: { text: '✅', key: msg.key }
-                    }).catch(() => {});
+                    try {
+                        await sock.sendMessage(chatJid, { react: { text: '✅', key: msg.key } });
+                    } catch (_) {}
                 }
             }
             continue;
         }
 
         if (session.status === 'playing') {
-            // Réponse : accepter un numéro (avec ou sans préfixe)
-            const prefix = global.PREFIX || '.';
-            let clean = text.trim();
-            if (clean.startsWith(prefix)) clean = clean.slice(prefix.length).trim();
-            const num = parseInt(clean);
-            if (!isNaN(num) && num >= 1 && num <= 5) {
+            // Accepter uniquement les numéros 1-5
+            const num = parseInt(text.trim());
+            if (!isNaN(num) && num >= 1 && num <= 5 && !session.questionAnswered) {
                 if (!session.answers.has(senderJid)) {
                     session.answers.set(senderJid, num);
-                    // Réaction discrète
-                    try { await sock.sendMessage(chatJid, { react: { text: '📝', key: msg.key } }); } catch (_) {}
+                    try {
+                        await sock.sendMessage(chatJid, { react: { text: '📝', key: msg.key } });
+                    } catch (_) {}
                 }
             }
             continue;
         }
     }
+}
+
+// ═══════════════════════════════════════
+// AFFICHAGE DE L'AIDE
+// ═══════════════════════════════════════
+
+async function showQuizHelp(sock, jid, msg) {
+    const topics = getAvailableTopics();
+    const languages = Object.keys(LANGUAGES).join(', ');
+    const prefix = global.PREFIX || '.';
+
+    let helpText = `📚 *QUIZ COMMAND*\n\n`;
+    helpText += `*Usage:*\n`;
+    helpText += `${prefix}quiz <langue> <sujet>\n`;
+    helpText += `${prefix}quiz <sujet>\n\n`;
+    helpText += `*Exemples:*\n`;
+    helpText += `${prefix}quiz anime\n`;
+    helpText += `${prefix}quiz fr histoire\n`;
+    helpText += `${prefix}quiz en science\n\n`;
+
+    if (topics.length > 0) {
+        helpText += `📁 *Sujets disponibles:*\n`;
+        helpText += topics.join(', ') + '\n\n';
+    } else {
+        helpText += `📁 *Sujets disponibles:* Aucun\n\n`;
+    }
+
+    helpText += `🌐 *Langues disponibles:*\n`;
+    helpText += languages + '\n\n';
+    helpText += `❓ *Questions:* ${QUESTIONS_PER_QUIZ} par quiz\n`;
+    helpText += `⏳ *Temps par question:* 15 secondes\n`;
+    helpText += `👥 *Participants:* ${MIN_PARTICIPANTS}-${MAX_PARTICIPANTS}\n\n`;
+    helpText += `🎮 *Comment jouer:*\n`;
+    helpText += `1. Lancez avec ${prefix}quiz <sujet>\n`;
+    helpText += `2. Les participants envoient "quiz ready"\n`;
+    helpText += `3. Répondez avec le numéro (1-5)\n`;
+    helpText += `4. Le lanceur peut arrêter avec "quiz stop"`;
+
+    return sock.sendMessage(jid, {
+        text: helpText,
+        contextInfo: STYLE,
+    }, { quoted: msg });
 }
 
 // ═══════════════════════════════════════
@@ -338,8 +532,14 @@ async function quizMessageHandler(sock, update) {
 async function quizCommand(sock, msg, args, jid) {
     const senderJid = msg.key.participant || msg.key.remoteJid;
     const isGroup = jid.endsWith('@g.us');
+
     if (!isGroup) {
         return sock.sendMessage(jid, { text: '❌ Le quiz se joue uniquement en groupe.' });
+    }
+
+    // Si pas d'arguments, afficher l'aide
+    if (args.length === 0) {
+        return await showQuizHelp(sock, jid, msg);
     }
 
     // Vérifier qu'il n'y a pas de session active
@@ -349,35 +549,51 @@ async function quizCommand(sock, msg, args, jid) {
 
     // Parser les arguments : [langue] [sujet]
     let lang = DEFAULT_LANG;
-    let topic = 'random';
-    if (args.length > 0) {
-        if (LANGUAGES[args[0].toLowerCase()]) {
-            lang = LANGUAGES[args[0].toLowerCase()];
-            topic = args.slice(1).join(' ');
-        } else {
-            topic = args.join(' ');
-        }
+    let topic = '';
+    let topicStartIndex = 0;
+
+    if (args.length > 0 && LANGUAGES[args[0].toLowerCase()]) {
+        lang = LANGUAGES[args[0].toLowerCase()];
+        topicStartIndex = 1;
     }
-    topic = topic.toLowerCase().trim() || 'random';
+
+    topic = args.slice(topicStartIndex).join(' ').toLowerCase().trim();
+
+    if (!topic) {
+        return await showQuizHelp(sock, jid, msg);
+    }
 
     // Charger les questions
-    const questions = loadQuestions(topic);
+    let questions = loadQuestions(topic);
     if (!questions || questions.length === 0) {
+        const topics = getAvailableTopics();
         return sock.sendMessage(jid, {
-            text: `❌ *Aucune question trouvée pour le sujet "${topic}".*`,
+            text: `❌ *Aucune question trouvée pour le sujet "${topic}".*\n\n` +
+                  `📁 *Sujets disponibles:*\n${topics.length > 0 ? topics.join(', ') : 'Aucun'}`,
             contextInfo: STYLE,
         });
     }
 
-    // Créer la session en mode attente
-    const session = createSession(jid, topic, lang, shuffleArray(questions).slice(0, QUESTIONS_PER_QUIZ));
+    // Filtrer les questions valides
+    questions = questions.filter(q => 
+        q && q.q1 && q.a && 
+        typeof q.q1 === 'string' && typeof q.a === 'string' &&
+        q.q1.trim().length > 0 && q.a.trim().length > 0
+    );
+
+    if (questions.length < MIN_PARTICIPANTS) {
+        return sock.sendMessage(jid, {
+            text: `❌ *Pas assez de questions valides pour le sujet "${topic}".*`,
+            contextInfo: STYLE,
+        });
+    }
+
+    // Créer la session
+    const selectedQuestions = shuffleArray(questions).slice(0, Math.min(QUESTIONS_PER_QUIZ, questions.length));
+    const session = createSession(jid, topic, lang, selectedQuestions);
     session.starter = senderJid;
     session.participants.add(senderJid);
     session.scores.set(senderJid, 0);
-
-    const topicsAvailable = fs.existsSync(QUIZ_DIR)
-        ? fs.readdirSync(QUIZ_DIR).filter(f => f.endsWith('.json')).map(f => f.replace('.json',''))
-        : [];
 
     await sock.sendMessage(jid, {
         text:
@@ -385,8 +601,8 @@ async function quizCommand(sock, msg, args, jid) {
             `📚 *Sujet:* ${topic}\n` +
             `🌐 *Langue:* ${lang}\n` +
             `❓ *Questions:* ${session.questions.length}\n` +
-            `👥 *Participants requis:* ${MIN_PARTICIPANTS} minimum\n` +
-            `\n` +
+            `⏳ *Temps par question:* 15 secondes\n` +
+            `👥 *Participants requis:* ${MIN_PARTICIPANTS} minimum\n\n` +
             `🔹 Envoyez *quiz ready* pour participer.\n` +
             `🔹 Le lanceur peut arrêter avec *quiz stop*.\n` +
             `⏳ *60 secondes pour rejoindre...*`,
@@ -412,7 +628,7 @@ async function quizCommand(sock, msg, args, jid) {
                   `🎮 Début du quiz dans quelques secondes...`,
             contextInfo: STYLE,
         });
-        // Fake typing initial
+        
         await sendTyping(sock, jid);
         await sendQuestion(sock, session);
     }, JOIN_WAIT_MS);
