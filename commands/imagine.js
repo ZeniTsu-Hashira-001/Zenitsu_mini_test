@@ -203,7 +203,7 @@ async function handleImagine(sock, msg, args, jid) {
 
 module.exports = {
   name: 'imagine',
-  aliases: ['imagine', 'gen', 'ai', 'draw'],
+  aliases: ['imagine', 'gen', 'pollination', 'draw'],
   description: 'Génère une image IA (Pollinations → Flux → Picsum)',
   usage: '.imagine <description>',
   adminOnly: false,
