@@ -7,7 +7,7 @@ const axios = require('axios');
 // ═══════════════════════════════════════
 
 const STYLE = {
-    forwardingScore: 540,
+    forwardingScore: 350,
     isForwarded: true,
     forwardedNewsletterMessageInfo: {
         newsletterJid: '120363425394543602@newsletter',
@@ -16,126 +16,193 @@ const STYLE = {
     },
 };
 
-// ═══════════════════════════════════════
-// APIS DE FALLBACK
-// ═══════════════════════════════════════
-
-const FALLBACK_APIS = [
-    {
-        name: 'Deline IQC',
-        url: (text, chatTime, statusTime) => 
-            `https://api.deline.web.id/maker/iqc?text=${encodeURIComponent(text)}&chatTime=${encodeURIComponent(chatTime)}&statusBarTime=${encodeURIComponent(statusTime)}`,
-        timeout: 15000,
-    },
-    {
-        name: 'Deline IQC V2',
-        url: (text, chatTime, statusTime) => 
-            `https://api.deline.web.id/maker/iqc2?text=${encodeURIComponent(text)}&chatTime=${encodeURIComponent(chatTime)}&statusBarTime=${encodeURIComponent(statusTime)}`,
-        timeout: 15000,
-    },
-];
+// API IQC
+const IQC_API = 'https://api.deline.web.id/maker/iqc';
 
 // ═══════════════════════════════════════
-// COMMANDE
+// FONCTIONS UTILITAIRES
+// ═══════════════════════════════════════
+
+// Obtenir l'heure actuelle GMT/UTC au format HH:MM
+function getCurrentGMTTime() {
+    const now = new Date();
+    const hours = String(now.getUTCHours()).padStart(2, '0');
+    const minutes = String(now.getUTCMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+}
+
+// Valider le format d'heure HH:MM
+function isValidTime(timeStr) {
+    if (!timeStr) return false;
+    const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return false;
+    const hours = parseInt(match[1]);
+    const minutes = parseInt(match[2]);
+    return hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59;
+}
+
+// Parser les arguments : text|chatTime|statusBarTime
+function parseArgs(args) {
+    const rawText = args.join(' ').trim();
+    
+    if (!rawText) {
+        return { text: null, chatTime: null, statusBarTime: null };
+    }
+
+    const parts = rawText.split('|').map(p => p.trim());
+    
+    const text = parts[0] || null;
+    const chatTime = parts[1] || null;
+    const statusBarTime = parts[2] || null;
+
+    return { text, chatTime, statusBarTime };
+}
+
+// ═══════════════════════════════════════
+// COMMAND
 // ═══════════════════════════════════════
 
 module.exports = {
     name: 'fakeiphone',
-    aliases: ['iphone', 'fakechat', 'imessage'],
-    category: 'fun',
+    aliases: ['iqc', 'iphonepost', 'fakechat', 'ichat'],
+    category: 'maker',
+    description: 'Create fake iPhone iMessage chat',
 
     async execute({ sock, msg, args, jid }) {
-        const query = args.join(' ');
+        const from = jid || msg.key.remoteJid;
 
-        if (!query || query.trim().length < 1) {
-            return sock.sendMessage(jid, {
-                text: '📱 *Fake iPhone Message Generator*\n\n' +
-                      '⚡ *Usage:* .fakeiphone <text>\n\n' +
-                      '✨ *Examples:*\n' +
-                      '.fakeiphone Hello Zenitsu\n' +
-                      '.fakeiphone This is a test\n' +
-                      '.fakeiphone Brat\n\n' +
-                      '📌 *Features:*\n' +
-                      '• Fake iMessage screenshot\n' +
-                      '• Custom text display\n' +
-                      '• iPhone style interface\n\n' +
+        // ─────────────────────────────────
+        // Récupérer le texte
+        // ─────────────────────────────────
+        let rawInput = args.join(' ').trim();
+
+        // Si pas de texte, vérifier si on répond à un message
+        if (!rawInput) {
+            const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (quoted) {
+                rawInput = quoted.conversation || quoted.extendedTextMessage?.text || '';
+            }
+        }
+
+        // Si toujours pas de texte → afficher l'aide
+        if (!rawInput) {
+            return sock.sendMessage(from, {
+                text: '📱 *Fake iPhone Chat (iQC)*\n\n' +
+                      '📌 *Usage:*\n' +
+                      '`.iqc <text>|<chatTime>|<statusBarTime>`\n\n' +
+                      '🎨 *Customization:*\n' +
+                      '• *text* — Message content\n' +
+                      '• *chatTime* — Time shown in chat (HH:MM)\n' +
+                      '• *statusBarTime* — Time in status bar (HH:MM)\n\n' +
+                      '💡 *Examples:*\n' +
+                      '`.iqc Hello World` — Auto GMT time\n' +
+                      '`.iqc Hello|14:30|14:35` — Custom times\n' +
+                      '`.iqc Test msg|22:11` — Chat time only\n' +
+                      '`.iqc Zenitsu|22:11|22:15` — Full custom\n\n' +
+                      '⏰ _If not specified, current GMT time is used_\n\n' +
                       '⚡ _Powered by Cybernova_',
                 contextInfo: STYLE,
             }, { quoted: msg });
         }
 
-        // Obtenir l'heure actuelle pour le statut et le chat
-        const now = new Date();
-        const hours = String(now.getHours()).padStart(2, '0');
-        const minutes = String(now.getMinutes()).padStart(2, '0');
-        const chatTime = `${hours}:${minutes}`;
+        // ─────────────────────────────────
+        // Parser les arguments
+        // ─────────────────────────────────
+        const { text, chatTime, statusBarTime } = parseArgs([rawInput]);
+
+        if (!text) {
+            return sock.sendMessage(from, {
+                text: '❌ *No text provided.*\n\nUsage: `.iqc <text>|<chatTime>|<statusBarTime>`',
+                contextInfo: STYLE,
+            }, { quoted: msg });
+        }
+
+        // ─────────────────────────────────
+        // Résolution des heures
+        // ─────────────────────────────────
+        const currentGMT = getCurrentGMTTime();
         
-        // Heure du statut (un peu plus tard)
-        const statusHours = String((now.getHours() + 1) % 24).padStart(2, '0');
-        const statusTime = `${statusHours}:${minutes}`;
+        let finalChatTime = chatTime;
+        let finalStatusBarTime = statusBarTime;
+
+        // Validation et fallback pour chatTime
+        if (!finalChatTime || !isValidTime(finalChatTime)) {
+            if (finalChatTime && !isValidTime(finalChatTime)) {
+                console.log(`⚠️ Invalid chatTime "${finalChatTime}", using GMT: ${currentGMT}`);
+            }
+            finalChatTime = currentGMT;
+        }
+
+        // Validation et fallback pour statusBarTime
+        if (!finalStatusBarTime || !isValidTime(finalStatusBarTime)) {
+            if (finalStatusBarTime && !isValidTime(finalStatusBarTime)) {
+                console.log(`⚠️ Invalid statusBarTime "${finalStatusBarTime}", using GMT: ${currentGMT}`);
+            }
+            finalStatusBarTime = currentGMT;
+        }
+
+        // Loading reaction
+        try { await sock.sendMessage(from, { react: { text: '⏳', key: msg.key } }); } catch (_) {}
 
         try {
-            await sock.sendMessage(jid, { react: { text: '📱', key: msg.key } });
+            // ─────────────────────────────────
+            // Appel API IQC
+            // ─────────────────────────────────
+            const apiUrl = `${IQC_API}?` +
+                `text=${encodeURIComponent(text)}` +
+                `&chatTime=${encodeURIComponent(finalChatTime)}` +
+                `&statusBarTime=${encodeURIComponent(finalStatusBarTime)}`;
 
-            let result = null;
-            let usedApi = '';
+            console.log(`📱 IQC: Generating for "${text.substring(0, 30)}..." (chat: ${finalChatTime}, status: ${finalStatusBarTime})`);
 
-            // Essayer chaque API
-            for (const api of FALLBACK_APIS) {
-                try {
-                    console.log(`📤 Trying ${api.name}...`);
-                    const url = api.url(query, chatTime, statusTime);
-                    
-                    const response = await axios.get(url, {
-                        responseType: 'arraybuffer',
-                        timeout: api.timeout,
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (compatible; ZenitsuBot/1.0)',
-                        },
-                    });
+            const response = await axios.get(apiUrl, {
+                responseType: 'arraybuffer',
+                timeout: 60000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                },
+            });
 
-                    // Vérifier si c'est une image valide
-                    const buffer = Buffer.from(response.data);
-                    if (buffer.length > 1000) { // Au moins 1KB
-                        result = buffer;
-                        usedApi = api.name;
-                        console.log(`✅ ${api.name} succeeded`);
-                        break;
-                    }
-                } catch (err) {
-                    console.log(`⚠️ ${api.name} failed: ${err.message}`);
-                }
+            const buffer = Buffer.from(response.data);
+
+            if (!buffer || buffer.length < 1000) {
+                throw new Error('Generated image is too small or empty');
             }
 
-            if (!result) {
-                await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
-                return sock.sendMessage(jid, {
-                    text: '❌ *All APIs failed*\n\n' +
-                          '💡 Try again later with different text.',
-                    contextInfo: STYLE,
-                }, { quoted: msg });
-            }
-
-            // Envoyer l'image
-            await sock.sendMessage(jid, {
-                image: result,
-                caption: `📱 *Fake iPhone Message*\n\n` +
-                         `💬 *Text:* ${query}\n` +
-                         `🕐 *Time:* ${chatTime}\n` +
-                         `🔧 *Source:* ${usedApi}\n\n` +
-                         `⚡ _Powered by Cybernova_`,
+            // ─────────────────────────────────
+            // Envoi de l'image générée
+            // ─────────────────────────────────
+            await sock.sendMessage(from, {
+                image: buffer,
+                caption: `📱 *Fake iPhone Chat*\n\n` +
+                         `💬 *Text:* ${text}\n` +
+                         `🕐 *Chat time:* ${finalChatTime}\n` +
+                         `🕐 *Status time:* ${finalStatusBarTime}\n` +
+                         `${!chatTime && !statusBarTime ? '⏰ _Using current GMT time_\n' : ''}` +
+                         `\n⚡ _Powered by Cybernova_`,
                 contextInfo: STYLE,
             }, { quoted: msg });
 
-            await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } });
+            // Success reaction
+            try { await sock.sendMessage(from, { react: { text: '✅', key: msg.key } }); } catch (_) {}
 
         } catch (err) {
-            console.error('❌ FakeiPhone error:', err.message);
-            await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } });
-            return sock.sendMessage(jid, {
-                text: `❌ *Failed to generate fake iPhone message*\n\n` +
-                      `⚠️ Error: ${err.message}\n\n` +
-                      '💡 Try again with different text.',
+            console.error('❌ IQC error:', err.message);
+
+            try { await sock.sendMessage(from, { react: { text: '❌', key: msg.key } }); } catch (_) {}
+
+            let errorMsg = '❌ *Fake iPhone Generation Failed*\n\n';
+
+            if (err.message.includes('timeout')) {
+                errorMsg += '⏰ *Timeout*\nThe API is taking too long.\n\n_Try again in a few moments._';
+            } else if (err.message.includes('too small') || err.message.includes('empty')) {
+                errorMsg += '📦 *Invalid response*\nThe API returned an empty or corrupted file.\n\n_Try again with different text._';
+            } else {
+                errorMsg += `💥 *Error*\n\n${err.message}`;
+            }
+
+            await sock.sendMessage(from, {
+                text: errorMsg,
                 contextInfo: STYLE,
             }, { quoted: msg });
         }
