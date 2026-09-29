@@ -48,7 +48,7 @@ const BOT_INFO = {
 
 module.exports = {
     name: 'menu2',
-    aliases: ['help', 'allmenu', 'commands'],
+    aliases: ['allmenu', 'commands'],
 
     async execute({ sock, msg, args, jid, config, stats, subBots }) {
         try {
