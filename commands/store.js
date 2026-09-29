@@ -72,7 +72,7 @@ function getMediaType(quoted) {
 
 module.exports = {
     name: 'store',
-    aliases: ['storage', 'save', 'getitem', 'deleteitem', 'liststore'],
+    aliases: ['storage', 'getitem', 'deleteitem', 'liststore'],
     category: 'owner',
 
     async execute({ sock, msg, args, jid }) {
