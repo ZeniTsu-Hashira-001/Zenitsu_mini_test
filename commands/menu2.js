@@ -203,11 +203,6 @@ END:VCARD`,
                         mentionedJid: mentionedJid,
                         forwardingScore: 58,
                         isForwarded: true,
-                        forwardedNewsletterMessageInfo: {
-                            newsletterJid: BOT_INFO.channelJid,
-                            newsletterName: BOT_INFO.channelName,
-                            serverMessageId: 202,
-                        },
                         externalAdReply: {
                             title: `⚡ ${BOT_INFO.name}`,
                             body: BOT_INFO.description,
