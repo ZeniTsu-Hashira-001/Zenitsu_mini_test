@@ -7,53 +7,41 @@ const path = require('path');
 const os = require('os');
 const axios = require('axios');
 
-// ═══════════════════════════════════════
-// STYLE
-// ═══════════════════════════════════════
-
-const STYLE = {
-    forwardingScore: 350,
-    isForwarded: true,
-    forwardedNewsletterMessageInfo: {
-        newsletterJid: '120363425394543602@newsletter',
-        newsletterName: '모🅒🅨🅑🅔🅡🅝🅞🅥🅐 🌟',
-        serverMessageId: 202,
-    },
-};
-
-// ═══════════════════════════════════════
-// FFMPEG PATH
-// ═══════════════════════════════════════
-
+// FFmpeg path
 let FFMPEG_PATH = 'ffmpeg';
 try {
     const ffmpegStatic = require('ffmpeg-static');
-    if (ffmpegStatic) {
-        FFMPEG_PATH = ffmpegStatic;
-        console.log('✅ Using ffmpeg-static:', FFMPEG_PATH);
-    }
-} catch (_) {
-    console.log('ℹ️ Using system ffmpeg');
-}
+    if (ffmpegStatic) FFMPEG_PATH = ffmpegStatic;
+} catch (_) {}
 
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─────────────────────────────────
+// Vérifier FFmpeg
+// ─────────────────────────────────
 function checkFfmpeg() {
     return new Promise((resolve) => {
-        exec(`"${FFMPEG_PATH}" -version`, { timeout: 5000 }, (err) => {
-            resolve(!err);
+        exec(`"${FFMPEG_PATH}" -version`, { timeout: 5000 }, (err, stdout) => {
+            if (err) {
+                console.log('❌ FFmpeg check failed:', err.message);
+                resolve(false);
+            } else {
+                const version = (stdout || '').split('\n')[0];
+                console.log('✅ FFmpeg:', version);
+                resolve(true);
+            }
         });
     });
 }
 
-// ═══════════════════════════════════════
-// TÉLÉCHARGEMENT MÉDIA
-// ═══════════════════════════════════════
-
+// ─────────────────────────────────
+// Téléchargements
+// ─────────────────────────────────
 async function downloadMediaFromMessage(msg) {
     try {
         const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
         if (!quoted) return null;
 
-        // Vidéo
         if (quoted.videoMessage) {
             const stream = await downloadContentFromMessage(quoted.videoMessage, 'video');
             let buffer = Buffer.from([]);
@@ -61,7 +49,6 @@ async function downloadMediaFromMessage(msg) {
             return { buffer: buffer.length > 0 ? buffer : null, type: 'video' };
         }
 
-        // Sticker (webp animé ou statique)
         if (quoted.stickerMessage) {
             const stream = await downloadContentFromMessage(quoted.stickerMessage, 'sticker');
             let buffer = Buffer.from([]);
@@ -69,7 +56,6 @@ async function downloadMediaFromMessage(msg) {
             return { buffer: buffer.length > 0 ? buffer : null, type: 'sticker' };
         }
 
-        // GIF/Video directement
         if (quoted.documentMessage?.mimetype?.includes('video')) {
             const stream = await downloadContentFromMessage(quoted.documentMessage, 'document');
             let buffer = Buffer.from([]);
@@ -79,36 +65,29 @@ async function downloadMediaFromMessage(msg) {
 
         return null;
     } catch (err) {
-        console.log('⚠️ Error downloading media:', err.message);
+        console.log('⚠️ Download error:', err.message);
         return null;
     }
 }
 
 async function downloadFromUrl(url) {
-    try {
-        const response = await axios.get(url, {
-            responseType: 'arraybuffer',
-            timeout: 60000,
-            maxRedirects: 5,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-            },
-        });
-        return Buffer.from(response.data);
-    } catch (err) {
-        console.log('⚠️ Error downloading from URL:', err.message);
-        return null;
-    }
+    const response = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 60000,
+        maxRedirects: 5,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+    });
+    return Buffer.from(response.data);
 }
 
-// ═══════════════════════════════════════
-// CONVERSIONS
-// ═══════════════════════════════════════
+// ─────────────────────────────────
+// Conversion vidéo → GIF (MP4 léger)
+// ─────────────────────────────────
+async function videoToGif(inputBuffer, options = {}) {
+    const { fps = 10, width = 320, maxDuration = 15 } = options;
 
-// Vidéo → GIF (MP4 avec gifPlayback)
-async function convertVideoToGif(inputBuffer, options = {}) {
-    const { fps = 15, width = 480, maxDuration = 30 } = options;
     const tmpDir = os.tmpdir();
     const ts = Date.now();
     const inputPath = path.join(tmpDir, `togif_in_${ts}.mp4`);
@@ -116,36 +95,49 @@ async function convertVideoToGif(inputBuffer, options = {}) {
 
     fs.writeFileSync(inputPath, inputBuffer);
 
-    // WhatsApp GIF = MP4 court avec playback auto
-    // - Max 30s (WhatsApp limite à ~60s mais on garde 30s pour fluidité)
-    // - Résolution réduite pour la fluidité
-    // - Sans audio (GIF = silencieux)
-    const filter = `fps=${fps},scale=${width}:-1:flags=lanczos`;
-    const ffmpegCmd =
+    // ⚡ Configuration ULTRA-LÉGÈRE pour Render free tier
+    // - Preset ultrafast = minimum CPU
+    // - 1 thread = moins de RAM
+    // - Résolution 320p = ~50KB par seconde
+    // - FPS 10 = fluide mais léger
+    // - CRF 32 = compression maximale
+    const vf = `fps=${fps},scale=${width}:-1:flags=fast_bilinear`;
+
+    const cmd =
         `"${FFMPEG_PATH}" -i "${inputPath}" ` +
         `-t ${maxDuration} ` +
-        `-vf "${filter}" ` +
-        `-c:v libx264 -preset fast -crf 28 -pix_fmt yuv420p ` +
+        `-vf "${vf}" ` +
+        `-c:v libx264 ` +
+        `-preset ultrafast ` +
+        `-crf 32 ` +
+        `-pix_fmt yuv420p ` +
         `-an ` +
+        `-threads 1 ` +
         `-movflags +faststart ` +
         `-y "${outputPath}"`;
 
     return new Promise((resolve, reject) => {
-        exec(ffmpegCmd, { timeout: 180000, maxBuffer: 1024 * 1024 * 50 }, (err) => {
+        console.log('🎬 Running FFmpeg...');
+        const child = exec(cmd, { timeout: 120000, maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
             try { if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath); } catch (_) {}
 
             if (err) {
+                // Afficher la vraie erreur ffmpeg
+                const stderrTail = (stderr || '').split('\n').slice(-5).join('\n');
+                console.log('❌ FFmpeg error:', err.message);
+                console.log('FFmpeg stderr (last lines):', stderrTail);
                 try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
-                return reject(new Error('FFmpeg video→GIF conversion failed'));
+                return reject(new Error('FFmpeg conversion failed'));
             }
 
             try {
-                const outputBuffer = fs.readFileSync(outputPath);
+                const buffer = fs.readFileSync(outputPath);
                 fs.unlinkSync(outputPath);
-                if (!outputBuffer || outputBuffer.length < 1000) {
+                if (!buffer || buffer.length < 500) {
                     return reject(new Error('Converted file is empty'));
                 }
-                resolve(outputBuffer);
+                console.log(`✅ GIF created: ${(buffer.length / 1024).toFixed(1)} KB`);
+                resolve(buffer);
             } catch (e) {
                 reject(e);
             }
@@ -153,9 +145,12 @@ async function convertVideoToGif(inputBuffer, options = {}) {
     });
 }
 
-// Sticker (webp) → GIF (MP4)
-async function convertStickerToGif(inputBuffer, options = {}) {
-    const { fps = 15, width = 480 } = options;
+// ─────────────────────────────────
+// Conversion sticker → GIF
+// ─────────────────────────────────
+async function stickerToGif(inputBuffer, options = {}) {
+    const { fps = 10, width = 320 } = options;
+
     const tmpDir = os.tmpdir();
     const ts = Date.now();
     const inputPath = path.join(tmpDir, `togif_stk_${ts}.webp`);
@@ -163,45 +158,46 @@ async function convertStickerToGif(inputBuffer, options = {}) {
 
     fs.writeFileSync(inputPath, inputBuffer);
 
-    // Sticker webp → MP4 (gère animé et statique)
-    // - -loop 0 pour les webp animés
-    // - Fond transparent → noir par défaut (ou on peut mettre du blanc)
-    const filter = `fps=${fps},scale=${width}:-1:flags=lanczos,format=yuv420p`;
-    const ffmpegCmd =
-        `"${FFMPEG_PATH}" -loop 0 -i "${inputPath}" ` +
-        `-t 6 ` + // durée max pour un sticker
-        `-vf "${filter}" ` +
-        `-c:v libx264 -preset fast -crf 28 ` +
+    const vf = `fps=${fps},scale=${width}:-1:flags=fast_bilinear,format=yuv420p`;
+
+    const cmd =
+        `"${FFMPEG_PATH}" -i "${inputPath}" ` +
+        `-t 6 ` +
+        `-vf "${vf}" ` +
+        `-c:v libx264 ` +
+        `-preset ultrafast ` +
+        `-crf 32 ` +
         `-an ` +
+        `-threads 1 ` +
         `-movflags +faststart ` +
         `-y "${outputPath}"`;
 
     return new Promise((resolve, reject) => {
-        exec(ffmpegCmd, { timeout: 120000, maxBuffer: 1024 * 1024 * 50 }, (err) => {
+        exec(cmd, { timeout: 90000, maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
             try { if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath); } catch (_) {}
 
             if (err) {
+                const stderrTail = (stderr || '').split('\n').slice(-5).join('\n');
+                console.log('❌ Sticker FFmpeg error:', err.message);
+                console.log('FFmpeg stderr:', stderrTail);
                 try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
-                return reject(new Error('FFmpeg sticker→GIF conversion failed'));
+                return reject(new Error('Sticker conversion failed'));
             }
 
             try {
-                const outputBuffer = fs.readFileSync(outputPath);
+                const buffer = fs.readFileSync(outputPath);
                 fs.unlinkSync(outputPath);
-                if (!outputBuffer || outputBuffer.length < 1000) {
+                if (!buffer || buffer.length < 500) {
                     return reject(new Error('Converted sticker is empty'));
                 }
-                resolve(outputBuffer);
+                console.log(`✅ Sticker GIF created: ${(buffer.length / 1024).toFixed(1)} KB`);
+                resolve(buffer);
             } catch (e) {
                 reject(e);
             }
         });
     });
 }
-
-// ═══════════════════════════════════════
-// COMMAND
-// ═══════════════════════════════════════
 
 module.exports = {
     name: 'togif',
@@ -213,7 +209,7 @@ module.exports = {
         const from = jid || msg.key.remoteJid;
 
         // ─────────────────────────────────
-        // Parse arguments (options)
+        // Parse arguments
         // ─────────────────────────────────
         let mediaUrl = null;
         let customFps = null;
@@ -221,23 +217,18 @@ module.exports = {
 
         for (const arg of args) {
             const lower = arg.toLowerCase();
-
-            // Options : fps=N / width=N / w=N
             const fpsMatch = lower.match(/^(?:fps|f)=(\d+)$/);
             if (fpsMatch) {
                 const v = parseInt(fpsMatch[1]);
-                if (v >= 5 && v <= 30) customFps = v;
+                if (v >= 5 && v <= 20) customFps = v;
                 continue;
             }
-
             const widthMatch = lower.match(/^(?:width|w|size)=(\d+)$/);
             if (widthMatch) {
                 const v = parseInt(widthMatch[1]);
-                if (v >= 120 && v <= 720) customWidth = v;
+                if (v >= 120 && v <= 480) customWidth = v;
                 continue;
             }
-
-            // URL
             if (arg.startsWith('http://') || arg.startsWith('https://')) {
                 mediaUrl = arg;
             }
@@ -250,99 +241,81 @@ module.exports = {
         if (!hasFfmpeg) {
             return sock.sendMessage(from, {
                 text: '❌ *FFmpeg not available*\n\n' +
-                      'FFmpeg is required to convert media.\n\n' +
                       '*Fix:* Add `ffmpeg-static` to dependencies:\n' +
                       '`npm install ffmpeg-static`',
-                contextInfo: STYLE,
             }, { quoted: msg });
         }
 
         // ─────────────────────────────────
-        // Récupérer le média (reply > URL)
+        // Récupérer le média
         // ─────────────────────────────────
         let media = await downloadMediaFromMessage(msg);
 
         if (!media && mediaUrl) {
             try { await sock.sendMessage(from, { react: { text: '⏳', key: msg.key } }); } catch (_) {}
-            const buffer = await downloadFromUrl(mediaUrl);
-            if (buffer) {
-                media = { buffer, type: 'video' }; // URL → on suppose vidéo
+            try {
+                const buffer = await downloadFromUrl(mediaUrl);
+                media = { buffer, type: 'video' };
+            } catch (e) {
+                console.log('URL download failed:', e.message);
             }
         }
 
-        // Aucun média trouvé
         if (!media || !media.buffer) {
             return sock.sendMessage(from, {
-                text:
-                    '🎬 *Video → GIF Converter*\n\n' +
-                    '📌 *Usage:*\n' +
-                    '• Reply to a *video* + `.togif`\n' +
-                    '• Reply to a *sticker* + `.togif`\n' +
-                    '• `.togif <url>` — from URL\n\n' +
-                    '⚙️ *Options:*\n' +
-                    '• `fps=15` — frames per second (5-30)\n' +
-                    '• `width=480` — resolution (120-720)\n\n' +
-                    '💡 *Examples:*\n' +
-                    '`.togif`\n' +
-                    '`.togif fps=20`\n' +
-                    '`.togif width=360 https://ex.com/vid.mp4`\n\n' +
-                    '_🎁 Stickers animés → GIF (6s max)_\n' +
-                    '_🎬 Vidéos → GIF (30s max, sans audio)_',
-                contextInfo: STYLE,
+                text: '🎬 *Video → GIF Converter*\n\n' +
+                      '📌 *Usage:*\n' +
+                      '• Reply to a *video* + `.togif`\n' +
+                      '• Reply to a *sticker* + `.togif`\n' +
+                      '• `.togif <url>`\n\n' +
+                      '⚙️ *Options:*\n' +
+                      '• `fps=10` — frames per second (5-20)\n' +
+                      '• `width=320` — resolution (120-480)\n\n' +
+                      '💡 *Examples:*\n' +
+                      '`.togif`\n' +
+                      '`.togif fps=15`\n' +
+                      '`.togif width=240 fps=8`',
             }, { quoted: msg });
         }
 
-        // Loading reaction
         try { await sock.sendMessage(from, { react: { text: '⏳', key: msg.key } }); } catch (_) {}
 
-        // Message de traitement
         const processingMsg = await sock.sendMessage(from, {
-            text: `🎬 *Converting ${media.type} to GIF...*\n\n` +
-                  `📼 Source : *${media.type}*\n` +
-                  `📐 Width : *${customWidth || 480}px*\n` +
-                  `⚡ FPS : *${customFps || 15}*\n` +
-                  `⏱️ Duration : *${media.type === 'sticker' ? '6s' : '30s'} max*\n\n` +
-                  `_Please wait..._`,
-            contextInfo: STYLE,
+            text: `🎬 *Converting to GIF...*\n\n` +
+                  `📼 Source: *${media.type}*\n` +
+                  `📐 Width: *${customWidth || 320}px*\n` +
+                  `⚡ FPS: *${customFps || 10}*\n` +
+                  `⏱️ Max: *${media.type === 'sticker' ? '6s' : '15s'}*\n\n` +
+                  `_This may take 10-30s..._`,
         }, { quoted: msg });
 
         try {
-            // Options de conversion
             const options = {
-                fps: customFps || 15,
-                width: customWidth || 480,
-                maxDuration: media.type === 'sticker' ? 6 : 30,
+                fps: customFps || 10,
+                width: customWidth || 320,
+                maxDuration: media.type === 'sticker' ? 6 : 15,
             };
 
-            // Conversion selon le type
             let gifBuffer;
             if (media.type === 'sticker') {
-                gifBuffer = await convertStickerToGif(media.buffer, options);
+                gifBuffer = await stickerToGif(media.buffer, options);
             } else {
-                gifBuffer = await convertVideoToGif(media.buffer, options);
+                gifBuffer = await videoToGif(media.buffer, options);
             }
 
-            // Vérification taille
             const sizeMB = gifBuffer.length / 1024 / 1024;
             if (sizeMB > 16) {
-                throw new Error(`File too large (${sizeMB.toFixed(1)}MB > 16MB)`);
+                throw new Error(`File too large (${sizeMB.toFixed(1)}MB > 16MB). Try: .togif width=240 fps=8`);
             }
 
-            // ═══════════════════════════════════
-            // ENVOI EN GIF WHATSAPP
-            // gifPlayback: true → lecture auto en boucle
-            // ═══════════════════════════════════
+            // Envoi en GIF (MP4 + gifPlayback)
             await sock.sendMessage(from, {
                 video: gifBuffer,
                 gifPlayback: true,
                 mimetype: 'video/mp4',
-                // ⚠️ PAS de contextInfo ici pour garantir le GIF
             });
 
-            // Success reaction
             try { await sock.sendMessage(from, { react: { text: '✅', key: msg.key } }); } catch (_) {}
-
-            // Supprimer le message de traitement
             try { await sock.sendMessage(from, { delete: processingMsg.key }); } catch (_) {}
 
         } catch (err) {
@@ -354,25 +327,21 @@ module.exports = {
             let errorMsg = '❌ *Conversion Failed*\n\n';
 
             if (err.message.includes('FFmpeg')) {
-                errorMsg += '⚙️ *FFmpeg error*\n\n' +
-                            '_Media format not supported or corrupted._\n' +
-                            '_Try another video/sticker._';
+                errorMsg += '⚙️ *FFmpeg error*\n' +
+                            '_Media format not supported or corrupted._\n\n' +
+                            '💡 *Try:*\n' +
+                            '• A shorter video (<15s)\n' +
+                            '• Lower settings: `.togif width=240 fps=8`';
             } else if (err.message.includes('too large')) {
                 errorMsg += '📦 *File too large*\n\n' +
-                            '_WhatsApp GIFs are limited to ~16 MB._\n' +
-                            '_Try a shorter video or lower width._\n\n' +
-                            '💡 *Tip:* `.togif width=320 fps=10`';
+                            '💡 *Try:* `.togif width=240 fps=8`';
             } else if (err.message.includes('timeout')) {
-                errorMsg += '⏰ *Timeout*\n\n' +
-                            '_Media is too long or server is slow._';
+                errorMsg += '⏰ *Timeout*\n_The video is too long or the server is slow._';
             } else {
                 errorMsg += `⚠️ ${err.message}`;
             }
 
-            await sock.sendMessage(from, {
-                text: errorMsg,
-                contextInfo: STYLE,
-            }, { quoted: msg });
+            await sock.sendMessage(from, { text: errorMsg }, { quoted: msg });
         }
     },
 };
