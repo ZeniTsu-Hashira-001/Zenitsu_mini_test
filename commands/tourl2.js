@@ -81,22 +81,6 @@ const PERMANENT_SERVICES = [
         },
     },
     {
-        name: 'Tmpfiles',
-        fn: async (buffer, filename) => {
-            const form = new FormData();
-            form.append('file', buffer, { filename });
-            const { data } = await axios.post('https://tmpfiles.org/api/v1/upload', form, {
-                headers: form.getHeaders(),
-                timeout: 60000,
-            });
-            const url = data?.data?.url;
-            if (typeof url === 'string' && url.startsWith('http')) {
-                return url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
-            }
-            throw new Error('Invalid response from Tmpfiles');
-        },
-    },
-    {
         name: 'Uguu',
         fn: async (buffer, filename) => {
             const form = new FormData();
