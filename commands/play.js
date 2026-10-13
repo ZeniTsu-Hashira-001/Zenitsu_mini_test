@@ -1,17 +1,27 @@
 // ./commands/play.js
 
 const axios = require('axios');
-const { createReadStream } = require('fs');
-const { Readable } = require('stream');
+
+// ═══════════════════════════════════════
+// OPTIONAL: ID3 Tagging
+// ═══════════════════════════════════════
+let NodeID3 = null;
+try {
+    NodeID3 = require('node-id3');
+    console.log('✅ node-id3 loaded');
+} catch (_) {
+    console.log('ℹ️ node-id3 not installed — ID3 tags will be skipped');
+    console.log('   Install with: npm install node-id3');
+}
 
 // ═══════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════
 
-const QUALITIES = ['128kbps', '192kbps', '256kbps', '320kbps'];
-const DEFAULT_QUALITY = '128kbps';
-const MAX_DURATION_SECONDS = 600;
+const MAX_DURATION_SECONDS = 600;       // 10 min max
+const MAX_FILE_SIZE_MB = 16;            // WhatsApp audio limit
 const FALLBACK_THUMB = 'https://iili.io/COzVllj.jpg';
+const SEARCH_TTL_MS = 5 * 60 * 1000;    // 5 minutes
 
 const activeSearches = new Map();
 
@@ -31,107 +41,192 @@ const STYLE = {
 
 function parseDuration(str) {
     if (!str) return 0;
+    if (typeof str === 'number') return str;
     const s = String(str).trim();
     const m = s.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-    if (m) return (parseInt(m[1])||0)*3600 + (parseInt(m[2])||0)*60 + (parseInt(m[3])||0);
+    if (m) return (parseInt(m[1]) || 0) * 3600 + (parseInt(m[2]) || 0) * 60 + (parseInt(m[3]) || 0);
     return 0;
 }
 
 function formatDuration(sec) {
-    if (!sec) return 'Unknown';
-    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60);
-    return h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+    if (!sec || sec <= 0) return 'Unknown';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
+function truncate(str, max = 200) {
+    if (!str) return '';
+    const s = String(str).trim();
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+function isValidUrl(url) {
+    return typeof url === 'string' && /^https?:\/\//i.test(url);
 }
 
 // ═══════════════════════════════════════
-// SEARCH FALLBACKS
+// SEARCH APIs
 // ═══════════════════════════════════════
 
 const SEARCH_APIS = [
     {
         name: 'NexRay',
         fn: async (q) => {
-            const { data } = await axios.get(`https://api.nexray.eu.cc/search/youtube?q=${encodeURIComponent(q)}`, { timeout: 15000 });
+            const { data } = await axios.get(
+                `https://api.nexray.eu.cc/search/youtube?q=${encodeURIComponent(q)}`,
+                { timeout: 15000 }
+            );
             return (data?.result || []).map(r => ({
-                title: r.title, url: `https://youtube.com/watch?v=${r.id}`,
-                duration: r.duration, durationSeconds: r.seconds || parseDuration(r.duration),
-                views: r.views, thumbnail: r.image_url || '', channel: r.channel || '',
+                title: r.title || '',
+                url: r.url || `https://youtube.com/watch?v=${r.id}`,
+                videoId: r.id || '',
+                duration: r.duration || '',
+                durationSeconds: r.seconds || parseDuration(r.duration),
+                views: r.views || '',
+                thumbnail: r.image_url || '',
+                channel: r.channel || '',
+                channelUrl: r.channel_url || '',
+                description: r.description || '',
+                uploadedAt: r.upload_at || '',
+                source: 'NexRay',
             }));
         },
     },
     {
         name: 'DavidCyril',
         fn: async (q) => {
-            const { data } = await axios.get(`https://apis.davidcyriltech.my.id/youtube/search?query=${encodeURIComponent(q)}`, { timeout: 15000 });
+            const { data } = await axios.get(
+                `https://apis.davidcyriltech.my.id/youtube/search?query=${encodeURIComponent(q)}`,
+                { timeout: 15000 }
+            );
             return (data?.results || []).map(r => ({
-                title: r.title, url: `https://youtube.com/watch?v=${r.videoId}`,
-                duration: r.duration, durationSeconds: parseDuration(r.duration),
-                views: r.views?.toString() || '', thumbnail: r.thumbnail || '',
-            }));
-        },
-    },
-    {
-        name: 'ZellAPI',
-        fn: async (q) => {
-            const { data } = await axios.get(`https://zellapi.autos/search/youtube?q=${encodeURIComponent(q)}`, { timeout: 15000 });
-            return (data?.result || []).map(r => ({
-                title: r.title, url: `https://youtube.com/watch?v=${r.id}`,
-                duration: r.duration, durationSeconds: parseDuration(r.duration),
-                views: r.views, thumbnail: r.thumbnail || r.image_url || '',
+                title: r.title || '',
+                url: `https://youtube.com/watch?v=${r.videoId}`,
+                videoId: r.videoId || '',
+                duration: r.duration || '',
+                durationSeconds: parseDuration(r.duration),
+                views: r.views?.toString() || '',
+                thumbnail: r.thumbnail || '',
+                channel: r.author?.name || r.channel || '',
+                channelUrl: r.author?.url || '',
+                description: r.description || '',
+                uploadedAt: r.ago || '',
+                source: 'DavidCyril',
             }));
         },
     },
     {
         name: 'Yupra',
         fn: async (q) => {
-            const { data } = await axios.get(`https://api.yupra.my.id/api/search/youtube?q=${encodeURIComponent(q)}`, { timeout: 15000 });
+            const { data } = await axios.get(
+                `https://api.yupra.my.id/api/search/youtube?q=${encodeURIComponent(q)}`,
+                { timeout: 15000 }
+            );
             return (data?.results || []).map(r => ({
-                title: r.title, url: `https://www.youtube.com/watch?v=${r.videoId}`,
-                duration: r.duration, durationSeconds: r.seconds || parseDuration(r.duration),
-                views: r.views || '', thumbnail: r.image_url || '',
+                title: r.title || '',
+                url: r.url || `https://www.youtube.com/watch?v=${r.videoId}`,
+                videoId: r.videoId || '',
+                duration: r.duration || '',
+                durationSeconds: r.seconds || parseDuration(r.duration),
+                views: r.views || '',
+                thumbnail: r.image_url || r.thumbnail || '',
+                channel: r.author?.name || r.channel || '',
+                channelUrl: r.author?.url || '',
+                description: r.description || '',
+                uploadedAt: r.ago || '',
+                source: 'Yupra',
+            }));
+        },
+    },
+    {
+        name: 'ZellAPI',
+        fn: async (q) => {
+            const { data } = await axios.get(
+                `https://zellapi.autos/search/youtube?q=${encodeURIComponent(q)}`,
+                { timeout: 15000 }
+            );
+            return (data?.result || []).map(r => ({
+                title: r.title || '',
+                url: r.url || `https://youtube.com/watch?v=${r.id}`,
+                videoId: r.id || '',
+                duration: r.duration || '',
+                durationSeconds: parseDuration(r.duration),
+                views: r.views || '',
+                thumbnail: r.thumbnail || r.image_url || '',
+                channel: r.channel || '',
+                channelUrl: r.channel_url || '',
+                description: r.description || '',
+                uploadedAt: r.upload_at || '',
+                source: 'ZellAPI',
             }));
         },
     },
     {
         name: 'GiftedTech',
         fn: async (q) => {
-            const { data } = await axios.get(`https://api.giftedtech.co.ke/api/search/yts?apikey=gifted&query=${encodeURIComponent(q)}`, { timeout: 15000 });
+            const { data } = await axios.get(
+                `https://api.giftedtech.co.ke/api/search/yts?apikey=gifted&query=${encodeURIComponent(q)}`,
+                { timeout: 15000 }
+            );
             let results = data?.result || data?.results || (Array.isArray(data) ? data : []);
             return results.map(r => ({
-                title: r.title || r.name, url: r.url || r.link || '',
-                duration: r.duration || r.timestamp, durationSeconds: parseDuration(r.duration || r.timestamp),
-                views: r.views || r.view_count, thumbnail: r.image_url || r.thumbnail || '',
+                title: r.title || r.name || '',
+                url: r.url || r.link || '',
+                videoId: r.videoId || r.video_id || '',
+                duration: r.duration || r.timestamp || '',
+                durationSeconds: parseDuration(r.duration || r.timestamp),
+                views: r.views || r.view_count || '',
+                thumbnail: r.image_url || r.thumbnail || '',
+                channel: r.author?.name || r.channel || '',
+                channelUrl: r.author?.url || '',
+                description: r.description || '',
+                uploadedAt: r.ago || '',
+                source: 'GiftedTech',
             }));
         },
     },
 ];
 
 // ═══════════════════════════════════════
-// DOWNLOAD FALLBACKS
+// DOWNLOAD APIs
 // ═══════════════════════════════════════
 
 const DOWNLOAD_APIS = [
     {
         name: 'NexRay YTPlay',
         fn: async (url) => {
-            const { data } = await axios.get(`https://api.nexray.eu.cc/downloader/ytplay?q=${encodeURIComponent(url)}`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://api.nexray.eu.cc/downloader/ytplay?q=${encodeURIComponent(url)}`,
+                { timeout: 40000 }
+            );
+            const r = data?.result || {};
             return {
-                downloadUrl: data?.result?.download_url || '',
-                title: data?.result?.title || '',
-                thumbnail: data?.result?.thumbnail || FALLBACK_THUMB,
-                duration: data?.result?.seconds || 0,
+                downloadUrl: r.download_url || '',
+                title: r.title || '',
+                artist: r.channel || '',
+                thumbnail: r.thumbnail || '',
+                duration: r.seconds || 0,
+                views: r.views || '',
+                uploadedAt: r.upload_at || '',
             };
         },
     },
     {
         name: 'NeoSoft',
         fn: async (url) => {
-            const { data } = await axios.get(`https://api.neosoft.best/api/downloader/youtube-play?q=${encodeURIComponent(url)}&type=mp3`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://api.neosoft.best/api/downloader/youtube-play?q=${encodeURIComponent(url)}&type=mp3`,
+                { timeout: 40000 }
+            );
             return {
                 downloadUrl: data?.download || '',
                 title: data?.title || '',
                 artist: data?.artist || '',
-                thumbnail: data?.thumbnail || FALLBACK_THUMB,
+                thumbnail: data?.thumbnail || '',
                 duration: data?.duration || 0,
             };
         },
@@ -139,82 +234,136 @@ const DOWNLOAD_APIS = [
     {
         name: 'NexRay YTMP3',
         fn: async (url) => {
-            const { data } = await axios.get(`https://api.nexray.eu.cc/downloader/ytmp3?url=${encodeURIComponent(url)}`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://api.nexray.eu.cc/downloader/ytmp3?url=${encodeURIComponent(url)}`,
+                { timeout: 40000 }
+            );
+            const r = data?.result || {};
             return {
-                downloadUrl: data?.result?.download_url || '',
-                title: data?.result?.title || '',
-                thumbnail: data?.result?.thumbnail || FALLBACK_THUMB,
-                duration: data?.result?.seconds || 0,
+                downloadUrl: r.download_url || '',
+                title: r.title || '',
+                artist: r.channel || '',
+                thumbnail: r.thumbnail || '',
+                duration: r.seconds || 0,
             };
         },
     },
     {
         name: 'DavidCyril YTMP3',
         fn: async (url) => {
-            const { data } = await axios.get(`https://apis.davidcyriltech.my.id/download/ytmp3?url=${encodeURIComponent(url)}`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://apis.davidcyriltech.my.id/download/ytmp3?url=${encodeURIComponent(url)}`,
+                { timeout: 40000 }
+            );
+            const r = data?.result || {};
             return {
-                downloadUrl: data?.result?.download_url || '',
-                title: data?.result?.title || '',
-                thumbnail: data?.result?.thumbnail || FALLBACK_THUMB,
-            };
-        },
-    },
-    {
-        name: 'DavidCyril YTMP3V2',
-        fn: async (url) => {
-            const { data } = await axios.get(`https://apis.davidcyriltech.my.id/download/ytmp3v2?url=${encodeURIComponent(url)}`, { timeout: 40000 });
-            return {
-                downloadUrl: data?.result?.download_url || data?.download_url || '',
-                title: data?.result?.title || data?.title || '',
-                thumbnail: data?.result?.thumbnail || data?.thumbnail || FALLBACK_THUMB,
+                downloadUrl: r.download_url || '',
+                title: r.title || '',
+                artist: r.author || '',
+                thumbnail: r.thumbnail || '',
             };
         },
     },
     {
         name: 'Sylphy V2',
         fn: async (url) => {
-            const { data } = await axios.get(`https://sylphyy.xyz/download/v2/ytmp3?url=${encodeURIComponent(url)}`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://sylphyy.xyz/download/v2/ytmp3?url=${encodeURIComponent(url)}`,
+                { timeout: 40000 }
+            );
+            const r = data?.result || {};
             return {
-                downloadUrl: data?.result?.dl_url || '',
-                title: data?.result?.title || '',
-                thumbnail: FALLBACK_THUMB,
-            };
-        },
-    },
-    {
-        name: 'Aswin Sparky',
-        fn: async (url) => {
-            const { data } = await axios.get(`https://api-aswin-sparky.koyeb.app/api/downloader/ytv?url=${encodeURIComponent(url)}`, { timeout: 40000 });
-            return {
-                downloadUrl: data?.data?.url || '',
-                title: data?.data?.title || '',
-                thumbnail: FALLBACK_THUMB,
+                downloadUrl: r.dl_url || '',
+                title: r.title || '',
+                artist: r.artist || '',
+                thumbnail: r.thumbnail || '',
             };
         },
     },
     {
         name: 'PrinceTech',
         fn: async (url) => {
-            const { data } = await axios.get(`https://api.princetechn.com/api/download/ytmp3?apikey=prince&url=${encodeURIComponent(url)}`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://api.princetechn.com/api/download/ytmp3?apikey=prince&url=${encodeURIComponent(url)}`,
+                { timeout: 40000 }
+            );
+            const r = data?.result || {};
             return {
-                downloadUrl: data?.result?.download_url || data?.result?.url || data?.download_url || data?.url || '',
-                title: data?.result?.title || data?.title || '',
-                thumbnail: data?.result?.thumbnail || FALLBACK_THUMB,
+                downloadUrl: r.download_url || r.url || '',
+                title: r.title || '',
+                artist: r.artist || '',
+                thumbnail: r.thumbnail || '',
             };
         },
     },
     {
         name: 'GiftedTech',
         fn: async (url) => {
-            const { data } = await axios.get(`https://api.giftedtech.co.ke/api/download/ytmp3?apikey=gifted&url=${encodeURIComponent(url)}`, { timeout: 40000 });
+            const { data } = await axios.get(
+                `https://api.giftedtech.co.ke/api/download/ytmp3?apikey=gifted&url=${encodeURIComponent(url)}`,
+                { timeout: 40000 }
+            );
+            const r = data?.result || data || {};
             return {
-                downloadUrl: data?.result?.download_url || data?.result?.url || data?.url || data?.link || data?.download_url || '',
-                title: data?.result?.title || data?.title || '',
-                thumbnail: data?.result?.thumbnail || data?.thumbnail || FALLBACK_THUMB,
+                downloadUrl: r.download_url || r.url || r.link || '',
+                title: r.title || '',
+                artist: r.artist || '',
+                thumbnail: r.thumbnail || '',
             };
         },
     },
 ];
+
+// ═══════════════════════════════════════
+// ID3 TAGGING
+// ═══════════════════════════════════════
+
+async function tagMp3WithMetadata(audioBuffer, metadata) {
+    if (!NodeID3) return audioBuffer;
+
+    try {
+        const tags = {
+            title: truncate(metadata.title, 100),
+            artist: truncate(metadata.artist, 100),
+            album: 'Zenitsu Music',
+            comment: {
+                language: 'eng',
+                text: 'Downloaded by Zenitsu Bot',
+            },
+        };
+
+        // Ajouter la pochette (cover)
+        if (metadata.coverUrl) {
+            try {
+                const coverRes = await axios.get(metadata.coverUrl, {
+                    responseType: 'arraybuffer',
+                    timeout: 15000,
+                    headers: { 'User-Agent': 'Mozilla/5.0' },
+                });
+                const coverBuffer = Buffer.from(coverRes.data);
+
+                // Vérifier la taille (max 1 MB pour la pochette)
+                if (coverBuffer.length > 0 && coverBuffer.length < 1024 * 1024) {
+                    tags.image = {
+                        mime: 'image/jpeg',
+                        type: { id: 3, name: 'front cover' },
+                        description: 'Cover',
+                        imageBuffer: coverBuffer,
+                    };
+                }
+            } catch (err) {
+                console.log(`⚠️ Cover fetch failed: ${err.message}`);
+            }
+        }
+
+        const tagged = NodeID3.write(tags, audioBuffer);
+        console.log(`✅ ID3 tags applied: ${tags.title} by ${tags.artist}`);
+        return tagged;
+    } catch (err) {
+        console.log(`⚠️ ID3 tagging failed: ${err.message}`);
+        return audioBuffer;
+    }
+}
 
 // ═══════════════════════════════════════
 // COMMAND
@@ -222,46 +371,67 @@ const DOWNLOAD_APIS = [
 
 module.exports = {
     name: 'play',
-    aliases: ['ytmp3', 'music', 'song', 'youtube', 'yts'],
+    aliases: ['ytmp3', 'music', 'song', 'youtube', 'yts', 'yta'],
     category: 'downloader',
 
     async execute({ sock, msg, args, jid }) {
         const senderJid = msg.key.participant || msg.key.remoteJid;
-        const input = args.join(' ');
+        const input = args.join(' ').trim();
 
-        if (!input || input.trim().length < 1) {
+        // Aide
+        if (!input) {
             return sock.sendMessage(jid, {
                 text:
                     '🎵 *YouTube Music Downloader*\n\n' +
                     '⚡ *Usage:*\n' +
-                    '.play <song name>\n' +
-                    '.play <number> (to download)\n\n' +
+                    '• `.play <song name>` — Search\n' +
+                    '• `.play <number>` — Download result\n\n' +
                     '✨ *Examples:*\n' +
-                    '.play Spectre\n' +
-                    '.play Faded Alan Walker\n' +
-                    '.play 1\n\n' +
-                    '🔄 5 search + 9 download sources',
+                    '• `.play Spectre Alan Walker`\n' +
+                    '• `.play 1`\n\n' +
+                    '🔄 Multiple sources with fallback\n' +
+                    '📁 Files tagged with cover + metadata',
                 contextInfo: STYLE,
             }, { quoted: msg });
         }
 
+        // ─────────────────────────────────
+        // Download by number
+        // ─────────────────────────────────
         const numberMatch = input.match(/^(\d+)$/);
-
         if (numberMatch) {
             const selectedIndex = parseInt(numberMatch[1]) - 1;
             const stored = activeSearches.get(senderJid);
+
             if (!stored?.results?.length) {
-                return sock.sendMessage(jid, { text: '⚠️ No active search.', contextInfo: STYLE }, { quoted: msg });
+                return sock.sendMessage(jid, {
+                    text: '⚠️ *No active search.*\n\nUse `.play <song name>` first.',
+                    contextInfo: STYLE,
+                }, { quoted: msg });
             }
+
+            if (Date.now() - stored.timestamp > SEARCH_TTL_MS) {
+                activeSearches.delete(senderJid);
+                return sock.sendMessage(jid, {
+                    text: '⚠️ *Search expired.*\n\nPlease search again.',
+                    contextInfo: STYLE,
+                }, { quoted: msg });
+            }
+
             if (selectedIndex < 0 || selectedIndex >= stored.results.length) {
-                return sock.sendMessage(jid, { text: `⚠️ Choose 1-${stored.results.length}.`, contextInfo: STYLE }, { quoted: msg });
+                return sock.sendMessage(jid, {
+                    text: `⚠️ *Invalid number.*\n\nChoose between 1 and ${stored.results.length}.`,
+                    contextInfo: STYLE,
+                }, { quoted: msg });
             }
+
             const selected = stored.results[selectedIndex];
-            try { await sock.sendMessage(jid, { react: { text: '⬇️', key: msg.key } }); } catch (_) {}
-            return downloadMusic(sock, msg, jid, selected, input);
+            return await downloadMusic(sock, msg, jid, selected);
         }
 
-        // SEARCH
+        // ─────────────────────────────────
+        // Search
+        // ─────────────────────────────────
         try { await sock.sendMessage(jid, { react: { text: '🔍', key: msg.key } }); } catch (_) {}
 
         let results = null;
@@ -269,138 +439,221 @@ module.exports = {
 
         for (const api of SEARCH_APIS) {
             try {
-                results = await api.fn(input);
-                if (results?.length) {
+                console.log(`🔍 Search: ${api.name}...`);
+                const res = await api.fn(input);
+                if (res?.length) {
+                    results = res;
                     searchSource = api.name;
-                    console.log(`✅ Search: ${api.name} (${results.length})`);
+                    console.log(`✅ Search OK: ${api.name} (${res.length} results)`);
                     break;
                 }
             } catch (err) {
-                console.log(`⚠️ Search ${api.name}: ${err.message}`);
+                console.log(`⚠️ ${api.name}: ${err.message}`);
             }
         }
 
         if (!results?.length) {
             try { await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }); } catch (_) {}
-            return sock.sendMessage(jid, { text: '❌ No results found.', contextInfo: STYLE }, { quoted: msg });
+            return sock.sendMessage(jid, {
+                text: '❌ *No results found.*\n\nTry different keywords.',
+                contextInfo: STYLE,
+            }, { quoted: msg });
         }
 
-        const valid = results.filter(r => !r.durationSeconds || r.durationSeconds <= MAX_DURATION_SECONDS).slice(0, 5);
-        const final = valid.length ? valid : results.slice(0, 5);
+        // Filtrer les vidéos ≤ 10 min et garder 5 résultats
+        const filtered = results.filter(r => !r.durationSeconds || r.durationSeconds <= MAX_DURATION_SECONDS);
+        const final = (filtered.length >= 3 ? filtered : results).slice(0, 5);
 
+        // Sauvegarder pour la sélection numérique
         activeSearches.set(senderJid, { results: final, timestamp: Date.now() });
 
-        let reply = `🎵 *Search: ${input}*\n🎼 *Source:* ${searchSource}\n\n`;
-        final.forEach((r, i) => {
-            reply += `*${i + 1}.* ${r.title}\n   ⏱ ${formatDuration(r.durationSeconds)}`;
-            if (r.views) reply += ` | 👁 ${r.views}`;
-            if (r.channel) reply += ` | 📺 ${r.channel}`;
-            reply += '\n\n';
-        });
-        reply += '📌 Reply: .play <number>\n⏳ Expires in 5 min.';
+        // ═══════════════════════════════════
+        // AFFICHAGE AMÉLIORÉ AVEC HEADER
+        // (image du 1er résultat + infos complètes)
+        // ═══════════════════════════════════
+        const first = final[0];
+        const thumb = first.thumbnail || FALLBACK_THUMB;
 
-        await sock.sendMessage(jid, { text: reply, contextInfo: STYLE }, { quoted: msg });
+        let caption = `🎵 *YouTube Music Search*\n\n`;
+        caption += `🔍 *Query:* ${truncate(input, 60)}\n`;
+        caption += `🎼 *Source:* ${searchSource}\n`;
+        caption += `📊 *Results:* ${final.length}\n`;
+        caption += `\n━━━━━━━━━━━━━━━\n\n`;
+
+        final.forEach((r, i) => {
+            caption += `*${i + 1}.* ${truncate(r.title, 80)}\n`;
+
+            if (r.channel)   caption += `   📺 ${truncate(r.channel, 50)}\n`;
+            if (r.durationSeconds) caption += `   ⏱ ${formatDuration(r.durationSeconds)}\n`;
+            if (r.views)     caption += `   👁 ${r.views}\n`;
+            if (r.uploadedAt) caption += `   📅 ${r.uploadedAt}\n`;
+
+            caption += `\n`;
+        });
+
+        caption += `━━━━━━━━━━━━━━━\n\n`;
+        caption += `📌 *Reply:* \`.play <number>\`\n`;
+        caption += `⏳ *Expires:* 5 minutes\n\n`;
+        caption += `⚡ _Powered by Zenitsu AI_`;
+
+        // Envoyer avec l'image du premier résultat en header
+        try {
+            await sock.sendMessage(jid, {
+                image: { url: thumb },
+                caption,
+                contextInfo: STYLE,
+            }, { quoted: msg });
+        } catch (imgErr) {
+            console.log(`⚠️ Header image failed: ${imgErr.message}`);
+            await sock.sendMessage(jid, {
+                text: caption,
+                contextInfo: STYLE,
+            }, { quoted: msg });
+        }
+
         try { await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }); } catch (_) {}
 
+        // Nettoyage automatique
         setTimeout(() => {
-            if (activeSearches.get(senderJid)?.timestamp < Date.now() - 300000) activeSearches.delete(senderJid);
-        }, 300000);
+            const stored = activeSearches.get(senderJid);
+            if (stored && Date.now() - stored.timestamp >= SEARCH_TTL_MS) {
+                activeSearches.delete(senderJid);
+            }
+        }, SEARCH_TTL_MS + 1000);
     },
 };
 
 // ═══════════════════════════════════════
-// DOWNLOAD - VERSION CORRIGÉE
+// DOWNLOAD MUSIC
 // ═══════════════════════════════════════
 
-async function downloadMusic(sock, msg, jid, track, query) {
-    // Envoyer un message de progression
-    await sock.sendMessage(jid, {
-        text: `⏳ *Downloading:* ${track.title}\n📥 Please wait...`,
+async function downloadMusic(sock, msg, jid, track) {
+    // ─────────────────────────────────
+    // Progress message
+    // ─────────────────────────────────
+    const progressMsg = await sock.sendMessage(jid, {
+        text:
+            `⏳ *Preparing download...*\n\n` +
+            `🎵 *Track:* ${truncate(track.title, 80)}\n` +
+            `📺 *Channel:* ${truncate(track.channel || 'Unknown', 60)}\n` +
+            `⏱ *Duration:* ${formatDuration(track.durationSeconds)}\n\n` +
+            `_Please wait..._`,
         contextInfo: STYLE,
     }, { quoted: msg });
 
+    try { await sock.sendMessage(jid, { react: { text: '⬇️', key: msg.key } }); } catch (_) {}
+
+    // ─────────────────────────────────
+    // Download from multiple sources
+    // ─────────────────────────────────
     let dlResult = null;
     let usedApi = '';
 
-    // Essayer chaque API de téléchargement
     for (const api of DOWNLOAD_APIS) {
         try {
-            console.log(`⬇️ Download: ${api.name}...`);
-            dlResult = await api.fn(track.url);
-            if (dlResult?.downloadUrl && dlResult.downloadUrl.startsWith('http')) {
+            console.log(`⬇️ Trying ${api.name}...`);
+            const result = await api.fn(track.url);
+
+            if (result?.downloadUrl && isValidUrl(result.downloadUrl)) {
+                dlResult = result;
                 usedApi = api.name;
-                console.log(`✅ Download: ${api.name}`);
+                console.log(`✅ Download OK: ${api.name}`);
                 break;
             }
+            console.log(`⚠️ ${api.name}: invalid URL`);
         } catch (err) {
-            console.log(`⚠️ Download ${api.name}: ${err.message}`);
+            console.log(`⚠️ ${api.name}: ${err.message}`);
         }
     }
 
     if (!dlResult?.downloadUrl) {
+        try { await sock.sendMessage(jid, { delete: progressMsg.key }); } catch (_) {}
         try { await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }); } catch (_) {}
-        return sock.sendMessage(jid, { 
-            text: '❌ *All download sources failed.*\n\n💡 Try again later or use another song.',
-            contextInfo: STYLE 
+        return sock.sendMessage(jid, {
+            text:
+                '❌ *All download sources failed.*\n\n' +
+                '💡 *Try:*\n' +
+                '• A different song\n' +
+                '• A shorter video (<10 min)\n' +
+                '• Again in a few minutes',
+            contextInfo: STYLE,
         }, { quoted: msg });
     }
 
-    try { 
-        await sock.sendMessage(jid, { react: { text: '⬇️', key: msg.key } }); 
-    } catch (_) {}
-
-    // TÉLÉCHARGER L'AUDIO
+    // ─────────────────────────────────
+    // Download audio file
+    // ─────────────────────────────────
     let audioBuffer = null;
     let sizeMB = 0;
-    
+
     try {
-        console.log(`📥 Downloading audio from: ${dlResult.downloadUrl}`);
-        
-        const audioRes = await axios.get(dlResult.downloadUrl, { 
-            responseType: 'arraybuffer', 
+        console.log(`📥 Downloading audio: ${dlResult.downloadUrl.substring(0, 100)}...`);
+
+        const audioRes = await axios.get(dlResult.downloadUrl, {
+            responseType: 'arraybuffer',
             timeout: 120000,
+            maxRedirects: 5,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'audio/mpeg,audio/*,*/*',
+            },
         });
-        
+
         audioBuffer = Buffer.from(audioRes.data);
-        sizeMB = (audioBuffer.length / 1048576).toFixed(2);
-        
-        console.log(`✅ Audio downloaded: ${sizeMB} MB`);
-        
+        sizeMB = audioBuffer.length / 1048576;
+
+        console.log(`✅ Audio: ${sizeMB.toFixed(2)} MB`);
+
+        if (sizeMB > MAX_FILE_SIZE_MB) {
+            throw new Error(`File too large (${sizeMB.toFixed(1)} MB > ${MAX_FILE_SIZE_MB} MB)`);
+        }
     } catch (err) {
-        console.log(`❌ Audio download error: ${err.message}`);
+        console.log(`❌ Audio download: ${err.message}`);
+        try { await sock.sendMessage(jid, { delete: progressMsg.key }); } catch (_) {}
         try { await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }); } catch (_) {}
-        return sock.sendMessage(jid, { 
-            text: '❌ *Failed to download audio.*\n\n' +
-                  `⚠️ Error: ${err.message}\n` +
-                  '💡 Try again with a different song.',
-            contextInfo: STYLE 
+        return sock.sendMessage(jid, {
+            text:
+                '❌ *Failed to download audio.*\n\n' +
+                `⚠️ ${err.message}`,
+            contextInfo: STYLE,
         }, { quoted: msg });
     }
 
-    // Préparer les métadonnées
-    const title = dlResult.title || track.title || query;
+    // ─────────────────────────────────
+    // Prepare metadata
+    // ─────────────────────────────────
+    const title = dlResult.title || track.title || 'Unknown';
     const artist = dlResult.artist || track.channel || 'YouTube Music';
-    const thumb = dlResult.thumbnail || track.thumbnail || FALLBACK_THUMB;
+    const thumbnail = dlResult.thumbnail || track.thumbnail || FALLBACK_THUMB;
     const duration = track.durationSeconds || dlResult.duration || 0;
 
+    // ─────────────────────────────────
+    // Embed ID3 tags (title, artist, cover)
+    // ─────────────────────────────────
+    console.log('🏷️ Applying ID3 tags...');
+    const taggedBuffer = await tagMp3WithMetadata(audioBuffer, {
+        title,
+        artist,
+        coverUrl: thumbnail,
+    });
+
+    // ─────────────────────────────────
+    // Send audio with externalAdReply (header preview)
+    // ─────────────────────────────────
     try {
-        // ENVOYER L'AUDIO AVEC CONTEXTE
         console.log(`📤 Sending audio: ${title}`);
-        
+
         await sock.sendMessage(jid, {
-            audio: audioBuffer,
+            audio: taggedBuffer,
             mimetype: 'audio/mpeg',
             ptt: false,
-            fileName: `${title.slice(0, 100)}_zenitsu.mp3`,
+            fileName: `${truncate(title, 60)}.mp3`,
             contextInfo: {
                 externalAdReply: {
-                    title: title.slice(0, 100),
-                    body: artist.slice(0, 100),
-                    thumbnailUrl: thumb,
-                    sourceUrl: track.url || `https://youtube.com/watch?v=${track.id || ''}`,
+                    title: truncate(title, 100),
+                    body: truncate(artist, 100),
+                    thumbnailUrl: thumbnail,
+                    sourceUrl: track.url || '',
                     mediaType: 1,
                     renderLargerThumbnail: true,
                     showAdAttribution: false,
@@ -408,31 +661,34 @@ async function downloadMusic(sock, msg, jid, track, query) {
             },
         }, { quoted: msg });
 
-        console.log(`✅ Audio sent successfully`);
+        console.log(`✅ Audio sent`);
 
-        // Envoyer un message récapitulatif (plus court cette fois)
+        // Supprimer le message de progression
+        try { await sock.sendMessage(jid, { delete: progressMsg.key }); } catch (_) {}
+
+        // Envoyer un récapitulatif compact
+        const summary =
+            `🎵 *${truncate(title, 80)}*\n` +
+            `🎤 ${truncate(artist, 60)}\n` +
+            `⏱ ${formatDuration(duration)} • 📦 ${sizeMB.toFixed(2)} MB\n` +
+            `🔧 ${usedApi}`;
+
         await sock.sendMessage(jid, {
-            text:
-                '🎵 *Music Downloaded*\n\n' +
-                `📌 *Title:* ${title.slice(0, 100)}${title.length > 100 ? '...' : ''}\n` +
-                `🎤 *Artist:* ${artist.slice(0, 100)}${artist.length > 100 ? '...' : ''}\n` +
-                (duration ? `⏱ *Duration:* ${formatDuration(duration)}\n` : '') +
-                `📦 *Size:* ${sizeMB} MB\n` +
-                `🔧 *Source:* ${usedApi}\n\n` +
-                `⚡ _Powered by Zenitsu AI_`,
+            text: summary,
             contextInfo: STYLE,
         }, { quoted: msg });
 
         try { await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }); } catch (_) {}
 
     } catch (err) {
-        console.log(`❌ Send audio error: ${err.message}`);
+        console.log(`❌ Send error: ${err.message}`);
+        try { await sock.sendMessage(jid, { delete: progressMsg.key }); } catch (_) {}
         try { await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }); } catch (_) {}
-        return sock.sendMessage(jid, { 
-            text: '❌ *Failed to send audio.*\n\n' +
-                  `⚠️ Error: ${err.message}\n` +
-                  '💡 Try again or use a shorter song.',
-            contextInfo: STYLE 
+        return sock.sendMessage(jid, {
+            text:
+                '❌ *Failed to send audio.*\n\n' +
+                `⚠️ ${err.message}`,
+            contextInfo: STYLE,
         }, { quoted: msg });
     }
 }
