@@ -371,7 +371,7 @@ async function tagMp3WithMetadata(audioBuffer, metadata) {
 
 module.exports = {
     name: 'play',
-    aliases: ['ytmp3', 'music', 'song', 'youtube', 'yts', 'yta'],
+    aliases: ['ytmp', 'music1', 'song1', 'youtube1', 'yts1', 'yta'],
     category: 'downloader',
 
     async execute({ sock, msg, args, jid }) {
