@@ -94,7 +94,7 @@ const PROVIDERS = [
     {
         name: 'Gemini',
         model: 'gemini-2.5-flash',
-        envKey: 'GEMINI_API_KEY',
+        envKey: 'AQ.Ab8RN6J1h2dUPCHOANCvNUVCwXXv7YumfMWrImgxE3YHYdwI2A',
         async analyze(imageBase64, mime, prompt) {
             const apiKey = process.env.GEMINI_API_KEY;
             if (!apiKey) throw new Error('GEMINI_API_KEY missing');
