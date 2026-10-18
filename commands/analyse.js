@@ -17,13 +17,17 @@ const STYLE = {
 };
 
 // ═══════════════════════════════════════
-// CONFIG
+// CONFIG & CLÉS API
 // ═══════════════════════════════════════
 
-const LIMIT_MS = 15 * 60 * 1000;        // 15 minutes
-const MAX_PROVIDERS = 3;                // afficher jusqu'à 3 résultats
-const MIN_PROVIDERS = 2;                // en afficher au moins 2
-const TIMEOUT_PER_PROVIDER = 20000;     // 20 s par provider
+const LIMIT_MS = 15 * 60 * 1000;
+const MAX_PROVIDERS = 3;
+const MIN_PROVIDERS = 2;
+const TIMEOUT_PER_PROVIDER = 25000;
+
+// Clés intégrées directement (à révoquer après test)
+const GROQ_API_KEY = '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';
+const GEMINI_API_KEY = 'AQ.Ab8RN6J1h2dUPCHOANCvNUVCwXXv7YumfMWrImgxE3YHYdwI2A';
 
 const lastUsage = new Map();
 
@@ -33,7 +37,7 @@ const lastUsage = new Map();
 
 const SYSTEM_PROMPT = `You are a professional vision analyst. Analyze the image with precision and natural language. Structure your answer exactly like this:
 
-1. **General description** — 5-6 sentences.
+1. **General description** — 2-3 sentences.
 2. **Visual details** — colors, composition, lighting, visible text.
 3. **Context & mood** — emotion, style, era, setting.
 4. **Notable elements** — people, objects, animals, logos, landmarks.
@@ -41,139 +45,6 @@ const SYSTEM_PROMPT = `You are a professional vision analyst. Analyze the image 
 If the image contains text, transcribe it exactly.
 If the image is blurry, say so honestly.
 Answer in the same language as the user's question.`;
-
-// ═══════════════════════════════════════
-// PROVIDERS
-// ═══════════════════════════════════════
-
-const PROVIDERS = [
-    {
-        name: 'Groq',
-        model: 'qwen/qwen3.8-27b',
-        envKey: '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',
-        async analyze(imageBase64, mime, prompt) {
-            const apiKey = process.env.GROQ_API_KEY;
-            if (!apiKey) throw new Error('GROQ_API_KEY missing');
-
-            const { data } = await axios.post(
-                'https://api.groq.com/openai/v1/chat/completions',
-                {
-                    model: this.model,
-                    messages: [
-                        { role: 'system', content: SYSTEM_PROMPT },
-                        {
-                            role: 'user',
-                            content: [
-                                { type: 'text', text: prompt },
-                                {
-                                    type: 'image_url',
-                                    image_url: {
-                                        url: `data:${mime};base64,${imageBase64}`,
-                                    },
-                                },
-                            ],
-                        },
-                    ],
-                    temperature: 0.2,
-                    max_completion_tokens: 1024,
-                },
-                {
-                    headers: {
-                        Authorization: `Bearer ${apiKey}`,
-                        'Content-Type': 'application/json',
-                    },
-                    timeout: TIMEOUT_PER_PROVIDER,
-                }
-            );
-
-            const text = data?.choices?.[0]?.message?.content;
-            if (!text) throw new Error('Empty Groq response');
-            return text;
-        },
-    },
-    {
-        name: 'Gemini',
-        model: 'gemini-2.5-flash',
-        envKey: 'AQ.Ab8RN6J1h2dUPCHOANCvNUVCwXXv7YumfMWrImgxE3YHYdwI2A',
-        async analyze(imageBase64, mime, prompt) {
-            const apiKey = process.env.GEMINI_API_KEY;
-            if (!apiKey) throw new Error('GEMINI_API_KEY missing');
-
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${apiKey}`;
-
-            const { data } = await axios.post(
-                url,
-                {
-                    contents: [
-                        {
-                            role: 'user',
-                            parts: [
-                                { text: SYSTEM_PROMPT },
-                                { text: prompt },
-                                {
-                                    inline_data: {
-                                        mime_type: mime,
-                                        data: imageBase64,
-                                    },
-                                },
-                            ],
-                        },
-                    ],
-                    generationConfig: {
-                        temperature: 0.2,
-                        maxOutputTokens: 1024,
-                    },
-                },
-                {
-                    headers: { 'Content-Type': 'application/json' },
-                    timeout: TIMEOUT_PER_PROVIDER,
-                }
-            );
-
-            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (!text) throw new Error('Empty Gemini response');
-            return text;
-        },
-    },
-    {
-        name: 'OVHcloud',
-        model: 'Qwen2.5-VL-72B-Instruct',
-        envKey: null, // anonyme, pas de clé
-        async analyze(imageBase64, mime, prompt) {
-            const { data } = await axios.post(
-                'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions',
-                {
-                    model: this.model,
-                    messages: [
-                        { role: 'system', content: SYSTEM_PROMPT },
-                        {
-                            role: 'user',
-                            content: [
-                                { type: 'text', text: prompt },
-                                {
-                                    type: 'image_url',
-                                    image_url: {
-                                        url: `data:${mime};base64,${imageBase64}`,
-                                    },
-                                },
-                            ],
-                        },
-                    ],
-                    temperature: 0.2,
-                    max_tokens: 1024,
-                },
-                {
-                    headers: { 'Content-Type': 'application/json' },
-                    timeout: TIMEOUT_PER_PROVIDER,
-                }
-            );
-
-            const text = data?.choices?.[0]?.message?.content;
-            if (!text) throw new Error('Empty OVH response');
-            return text;
-        },
-    },
-];
 
 // ═══════════════════════════════════════
 // UTILS
@@ -185,16 +56,11 @@ function getSenderId(msg) {
 
 function checkLimit(userId, isPro) {
     if (isPro) return { allowed: true, remaining: 0 };
-
     const now = Date.now();
     const last = lastUsage.get(userId) || 0;
     const elapsed = now - last;
-
     if (elapsed < LIMIT_MS) {
-        return {
-            allowed: false,
-            remaining: Math.ceil((LIMIT_MS - elapsed) / 1000),
-        };
+        return { allowed: false, remaining: Math.ceil((LIMIT_MS - elapsed) / 1000) };
     }
     return { allowed: true, remaining: 0 };
 }
@@ -213,16 +79,200 @@ setInterval(() => {
 async function downloadImageFromMessage(sock, msg) {
     const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
     if (!quoted?.imageMessage) return null;
-
     const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
     const stream = await downloadContentFromMessage(quoted.imageMessage, 'image');
     let buffer = Buffer.from([]);
     for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-
     return {
         base64: buffer.toString('base64'),
         mime: quoted.imageMessage.mimetype || 'image/jpeg',
     };
+}
+
+// ═══════════════════════════════════════
+// PROVIDERS AVEC CLÉ (Groq, Gemini)
+// ═══════════════════════════════════════
+
+const KEYED_PROVIDERS = [
+    {
+        name: 'Groq',
+        model: 'qwen/qwen3.6-27b',
+        async analyze(imageBase64, mime, prompt) {
+            const { data } = await axios.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                {
+                    model: this.model,
+                    messages: [
+                        { role: 'system', content: SYSTEM_PROMPT },
+                        {
+                            role: 'user',
+                            content: [
+                                { type: 'text', text: prompt },
+                                { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBase64}` } },
+                            ],
+                        },
+                    ],
+                    temperature: 0.2,
+                    max_completion_tokens: 1024,
+                },
+                {
+                    headers: {
+                        Authorization: `Bearer ${GROQ_API_KEY}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: TIMEOUT_PER_PROVIDER,
+                }
+            );
+            const text = data?.choices?.[0]?.message?.content;
+            if (!text) throw new Error('Empty Groq response');
+            return text;
+        },
+    },
+    {
+        name: 'Gemini',
+        model: 'gemini-2.5-flash',
+        async analyze(imageBase64, mime, prompt) {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${GEMINI_API_KEY}`;
+            const { data } = await axios.post(
+                url,
+                {
+                    contents: [
+                        {
+                            role: 'user',
+                            parts: [
+                                { text: SYSTEM_PROMPT },
+                                { text: prompt },
+                                { inline_data: { mime_type: mime, data: imageBase64 } },
+                            ],
+                        },
+                    ],
+                    generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+                },
+                { headers: { 'Content-Type': 'application/json' }, timeout: TIMEOUT_PER_PROVIDER }
+            );
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!text) throw new Error('Empty Gemini response');
+            return text;
+        },
+    },
+];
+
+// ═══════════════════════════════════════
+// PROVIDERS SANS CLÉ (fallbacks)
+// ═══════════════════════════════════════
+
+const KEYLESS_PROVIDERS = [
+    {
+        name: 'OVHcloud',
+        model: 'Qwen2.5-VL-72B-Instruct',
+        async analyze(imageBase64, mime, prompt) {
+            // Endpoint anonyme OVHcloud (2 req/min par IP)[reference:0]
+            const { data } = await axios.post(
+                'https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions',
+                {
+                    model: this.model,
+                    messages: [
+                        { role: 'system', content: SYSTEM_PROMPT },
+                        {
+                            role: 'user',
+                            content: [
+                                { type: 'text', text: prompt },
+                                { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBase64}` } },
+                            ],
+                        },
+                    ],
+                    temperature: 0.2,
+                    max_tokens: 1024,
+                },
+                {
+                    headers: { 'Content-Type': 'application/json' },
+                    timeout: TIMEOUT_PER_PROVIDER,
+                }
+            );
+            const text = data?.choices?.[0]?.message?.content;
+            if (!text) throw new Error('Empty OVH response');
+            return text;
+        },
+    },
+    {
+        name: 'Pollinations',
+        model: 'openai',
+        async analyze(imageBase64, mime, prompt) {
+            // Endpoint OpenAI-compatible, sans clé[reference:1][reference:2]
+            const { data } = await axios.post(
+                'https://gen.pollinations.ai/v1/chat/completions',
+                {
+                    model: this.model,
+                    messages: [
+                        { role: 'system', content: SYSTEM_PROMPT },
+                        {
+                            role: 'user',
+                            content: [
+                                { type: 'text', text: prompt },
+                                { type: 'image_url', image_url: { url: `data:${mime};base64,${imageBase64}` } },
+                            ],
+                        },
+                    ],
+                    temperature: 0.2,
+                    max_tokens: 1024,
+                },
+                {
+                    headers: { 'Content-Type': 'application/json' },
+                    timeout: TIMEOUT_PER_PROVIDER,
+                }
+            );
+            const text = data?.choices?.[0]?.message?.content;
+            if (!text) throw new Error('Empty Pollinations response');
+            return text;
+        },
+    },
+];
+
+// ═══════════════════════════════════════
+// ORCHESTRATEUR
+// ═══════════════════════════════════════
+
+async function analyzeWithProvider(provider, imageBase64, mime, question) {
+    const start = Date.now();
+    try {
+        const text = await provider.analyze(imageBase64, mime, question);
+        return { provider: provider.name, model: provider.model, text, latency: Date.now() - start, error: null };
+    } catch (err) {
+        return { provider: provider.name, model: provider.model, text: null, latency: Date.now() - start, error: err.message };
+    }
+}
+
+async function runAnalysis(imageBase64, mime, question) {
+    // Phase 1 : providers avec clé (qualité prioritaire)
+    const keyedPromises = KEYED_PROVIDERS.map(p => analyzeWithProvider(p, imageBase64, mime, question));
+    const keyedResults = await Promise.allSettled(keyedPromises);
+    let successes = keyedResults
+        .map(r => (r.status === 'fulfilled' ? r.value : null))
+        .filter(r => r && r.text && !r.error);
+
+    // Phase 2 : si moins de MIN_PROVIDERS, ajouter les providers sans clé
+    if (successes.length < MIN_PROVIDERS) {
+        const keylessPromises = KEYLESS_PROVIDERS.map(p => analyzeWithProvider(p, imageBase64, mime, question));
+        const keylessResults = await Promise.allSettled(keylessPromises);
+        const keylessSuccesses = keylessResults
+            .map(r => (r.status === 'fulfilled' ? r.value : null))
+            .filter(r => r && r.text && !r.error);
+        successes = [...successes, ...keylessSuccesses];
+    }
+
+    // Phase 3 : si toujours pas assez, compléter avec n'importe quel provider restant
+    if (successes.length < MIN_PROVIDERS) {
+        const allProviders = [...KEYED_PROVIDERS, ...KEYLESS_PROVIDERS];
+        const remaining = allProviders.filter(p => !successes.some(s => s.provider === p.name));
+        const extraPromises = remaining.map(p => analyzeWithProvider(p, imageBase64, mime, question));
+        const extraResults = await Promise.allSettled(extraPromises);
+        const extraSuccesses = extraResults
+            .map(r => (r.status === 'fulfilled' ? r.value : null))
+            .filter(r => r && r.text && !r.error);
+        successes = [...successes, ...extraSuccesses];
+    }
+
+    return successes.slice(0, MAX_PROVIDERS);
 }
 
 // ═══════════════════════════════════════
@@ -254,7 +304,7 @@ module.exports = {
                     '`.analyse pro Who is this celebrity?`\n\n' +
                     '⏱ *Free mode:* 1 analysis / 15 minutes\n' +
                     '🚀 *Pro mode:* unlimited (suffix `pro`)\n\n' +
-                    '🧠 *Providers:* Groq, Gemini, OVHcloud\n' +
+                    '🧠 *Providers:* Groq, Gemini, OVHcloud, Pollinations\n' +
                     '📊 *Returns:* 2 to 3 independent analyses\n\n' +
                     '⚡ _Powered by Zenitsu AI_',
                 contextInfo: STYLE,
@@ -266,14 +316,11 @@ module.exports = {
         // ─────────────────────────────────
         let isPro = false;
         let questionParts = [...args];
-
         if (questionParts[0]?.toLowerCase() === 'pro') {
             isPro = true;
             questionParts.shift();
         }
-
         const question = questionParts.join(' ').trim();
-
         if (!question) {
             return sock.sendMessage(from, {
                 text: '❌ *Please provide a question.*\n\nExample: `.analyse What is in this image?`',
@@ -285,7 +332,6 @@ module.exports = {
         // Image
         // ─────────────────────────────────
         const image = await downloadImageFromMessage(sock, msg);
-
         if (!image) {
             return sock.sendMessage(from, {
                 text: '❌ *No image found.*\n\nReply to an image or send an image with the command as caption.',
@@ -297,7 +343,6 @@ module.exports = {
         // Limit
         // ─────────────────────────────────
         const limit = checkLimit(senderId, isPro);
-
         if (!limit.allowed) {
             const minutes = Math.floor(limit.remaining / 60);
             const seconds = limit.remaining % 60;
@@ -326,91 +371,49 @@ module.exports = {
         }, { quoted: msg });
 
         // ─────────────────────────────────
-        // Run providers in parallel
+        // Run analysis
         // ─────────────────────────────────
-        const promises = PROVIDERS.map(async (provider) => {
-            const start = Date.now();
-            try {
-                const text = await provider.analyze(image.base64, image.mime, question);
-                return {
-                    provider: provider.name,
-                    model: provider.model,
-                    text,
-                    latency: Date.now() - start,
-                    error: null,
-                };
-            } catch (err) {
-                return {
-                    provider: provider.name,
-                    model: provider.model,
-                    text: null,
-                    latency: Date.now() - start,
-                    error: err.message,
-                };
-            }
-        });
-
-        const settled = await Promise.allSettled(promises);
-        const results = settled
-            .map(r => r.status === 'fulfilled' ? r.value : null)
-            .filter(Boolean);
-
-        const successes = results.filter(r => r.text && !r.error);
-        const failures = results.filter(r => r.error);
+        const results = await runAnalysis(image.base64, image.mime, question);
 
         // ─────────────────────────────────
-        // Not enough results
+        // Response (même si 1 seul résultat)
         // ─────────────────────────────────
-        if (successes.length < MIN_PROVIDERS) {
+        if (results.length === 0) {
             try { await sock.sendMessage(from, { delete: statusMsg.key }); } catch (_) {}
             try { await sock.sendMessage(from, { react: { text: '❌', key: msg.key } }); } catch (_) {}
-
-            let errMsg = `❌ *Analysis failed*\n\n`;
-            errMsg += `Only *${successes.length}* provider(s) succeeded (minimum: ${MIN_PROVIDERS}).\n\n`;
-            if (failures.length) {
-                errMsg += `⚠️ *Errors:*\n`;
-                failures.forEach(f => {
-                    errMsg += `• ${f.provider}: ${f.error.slice(0, 100)}\n`;
-                });
-            }
-            errMsg += `\n💡 Check your API keys or retry in a few moments.`;
-
-            return sock.sendMessage(from, { text: errMsg, contextInfo: STYLE }, { quoted: msg });
+            return sock.sendMessage(from, {
+                text:
+                    '❌ *Analysis failed*\n\n' +
+                    'All providers (Groq, Gemini, OVHcloud, Pollinations) are unavailable.\n\n' +
+                    '💡 Check your API keys or retry in a few moments.',
+                contextInfo: STYLE,
+            }, { quoted: msg });
         }
 
         // ─────────────────────────────────
-        // Build response
+        // Build response (1 à 3 résultats)
         // ─────────────────────────────────
-        const top = successes.slice(0, MAX_PROVIDERS);
-
         let reply = `🔍 *Image Analysis*\n\n`;
         reply += `❓ *Question:* ${question.slice(0, 200)}\n`;
         reply += `🚀 *Mode:* ${isPro ? 'Pro' : 'Free'}\n`;
-        reply += `📊 *Results:* ${top.length}/${PROVIDERS.length}\n\n`;
+        reply += `📊 *Results:* ${results.length}\n\n`;
         reply += `━━━━━━━━━━━━━━━\n\n`;
 
-        top.forEach((r, i) => {
+        results.forEach((r, i) => {
             reply += `*${i + 1}. ${r.provider}* (${r.model})\n`;
             reply += `⏱ ${(r.latency / 1000).toFixed(1)}s\n\n`;
             reply += `${r.text}\n\n`;
-            if (i < top.length - 1) reply += `━━━━━━━━━━━━━━━\n\n`;
+            if (i < results.length - 1) reply += `━━━━━━━━━━━━━━━\n\n`;
         });
 
         reply += `━━━━━━━━━━━━━━━\n`;
         reply += `⚡ _Powered by Zenitsu AI_`;
 
-        // ─────────────────────────────────
-        // Send
-        // ─────────────────────────────────
         try { await sock.sendMessage(from, { delete: statusMsg.key }); } catch (_) {}
 
-        await sock.sendMessage(from, {
-            text: reply,
-            contextInfo: STYLE,
-        }, { quoted: msg });
+        await sock.sendMessage(from, { text: reply, contextInfo: STYLE }, { quoted: msg });
 
         setLimit(senderId);
-
         try { await sock.sendMessage(from, { react: { text: '✅', key: msg.key } }); } catch (_) {}
     },
 };
