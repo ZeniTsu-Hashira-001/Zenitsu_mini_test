@@ -33,7 +33,7 @@ const lastUsage = new Map();
 
 const SYSTEM_PROMPT = `You are a professional vision analyst. Analyze the image with precision and natural language. Structure your answer exactly like this:
 
-1. **General description** — 2-3 sentences.
+1. **General description** — 5-6 sentences.
 2. **Visual details** — colors, composition, lighting, visible text.
 3. **Context & mood** — emotion, style, era, setting.
 4. **Notable elements** — people, objects, animals, logos, landmarks.
@@ -50,7 +50,7 @@ const PROVIDERS = [
     {
         name: 'Groq',
         model: 'qwen/qwen3.8-27b',
-        envKey: 'GROQ_API_KEY',
+        envKey: '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',
         async analyze(imageBase64, mime, prompt) {
             const apiKey = process.env.GROQ_API_KEY;
             if (!apiKey) throw new Error('GROQ_API_KEY missing');
