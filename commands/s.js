@@ -184,7 +184,7 @@ async function addMetadata(webpBuffer, packname, author) {
 
 module.exports = {
     name: 's',
-    aliases: ['s2', 'stick2', 'stik2'],
+    aliases: ['sticker', 'sticker1', 'st'],
     category: 'media',
 
     async execute({ sock, msg, args, jid }) {
