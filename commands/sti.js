@@ -1,5 +1,5 @@
 
-// ./commands/sticker.js
+// ./commands/sti.js
 
 const fs = require('fs');
 const path = require('path');
@@ -9,8 +9,8 @@ const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 const execPromise = util.promisify(exec);
 
 module.exports = {
-    name: 'sticker',
-    aliases: ['sticker', 'stick', 'makeit'],
+    name: 'sti',
+    aliases: ['stic', 'stick', 'makeit'],
     category: 'tools',
 
     async execute({ sock, msg, args, jid }) {
